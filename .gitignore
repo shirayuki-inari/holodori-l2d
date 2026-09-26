@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Downloaded game assets and generated model packages are not distributed.
+/input/
+/output/
+*.moc3
+*.model3.json
+*.physics3.json
+*.exp3.json
+*.motion3.json
+t_live2d_*_texture_*.png
+*.usm
+*.zip
