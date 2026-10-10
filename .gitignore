@@ -6,9 +6,21 @@ __pycache__/
 build/
 dist/
 
+# Local credentials and editor settings.
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+
 # Downloaded game assets and generated model packages are not distributed.
 /input/
 /output/
+.holodori_assets/
+*.pack
+*.db
+*.sqlite
+*.sqlite3
 *.moc3
 *.model3.json
 *.physics3.json

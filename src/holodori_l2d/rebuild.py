@@ -15,6 +15,8 @@ import warnings
 import zlib
 from pathlib import Path
 
+from .naming import validate_name
+
 
 BLENDS = {0: "Overwrite", 1: "Add", 2: "Multiply"}
 COMPONENTS = {0: "X", 1: "Y", 2: "Angle"}
@@ -262,6 +264,7 @@ def rebuild(
     motion_directory: Path | None = None,
     motion_pattern: str = "live2d_mot_*",
     force: bool = False,
+    model_name: str | None = None,
 ) -> dict:
     if not model_dir.is_dir():
         raise ValueError(f"找不到已提取的模型目录：{model_dir}")
@@ -282,9 +285,8 @@ def rebuild(
             rig = data["_rig"]
     if model_source is None:
         raise ValueError("模型包内未找到 MOC3 数据")
-    model_name = model_source["m_Name"]
-    if not re.fullmatch(r"[\w.-]+", model_name):
-        raise ValueError(f"不安全的模型文件名：{model_name!r}")
+    model_name = model_name if model_name is not None else model_source["m_Name"]
+    validate_name(model_name)
     moc_name = model_name + ".moc3"
     _write(output_dir / moc_name, bytes(model_source["_bytes"]), force=force)
 

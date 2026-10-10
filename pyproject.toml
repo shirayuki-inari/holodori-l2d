@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Download holodori Live2D assets and rebuild Cubism preview packages"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = ["httpx[http2]>=0.27,<1", "cryptography>=42", "prompt_toolkit>=3.0.43,<4"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -22,10 +23,12 @@ assets = [
   "holodori-asset-tools @ git+https://github.com/HolodoriDB/holodori-asset-tools.git@13f150fe9dfbd367be53e5ea1c0a4ceb258b74f2",
 ]
 test = ["pytest>=8,<10"]
+search = []
 
 [project.scripts]
 holodori-l2d = "holodori_l2d.cli:main"
 holodori-l2d-rebuild = "holodori_l2d.rebuild:main"
+holodori-l2d-search = "holodori_l2d.search:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,28 +1,26 @@
-"""Download game Live2D assets and rebuild a Cubism preview package by ID."""
+"""搜索卡牌，光标多选并下载 Live2D 模型；也支持 ID 和批量文件。"""
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import json
+import platform
 import re
 import subprocess
 import sys
 import tempfile
+import types
 import zipfile
 from pathlib import Path
 
+import httpx
+
 from .rebuild import rebuild
+from .naming import EXPORT_INFO, export_owner, validate_name
 
 
 CARD_ID = re.compile(r"^(\d{5})-(?:\d+-)?([a-z0-9]+)-(\d{4})-(\d{2})$")
-BATCH_CARD_ID = re.compile(r"^\d{5}-\d+-[a-z0-9]+-\d{4}-\d{2}$")
-INVALID_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-RESERVED_FOLDER_NAMES = {
-    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
-    *(f"COM{number}" for number in range(1, 10)),
-    *(f"LPT{number}" for number in range(1, 10)),
-}
 
 
 def model_id_from_input(value: str) -> tuple[str, str]:
@@ -38,15 +36,11 @@ def model_id_from_input(value: str) -> tuple[str, str]:
 
 
 def _batch_entry(card_id: str, folder_name: str) -> None:
-    if not BATCH_CARD_ID.fullmatch(card_id):
-        raise ValueError(f"卡牌 ID 格式不正确：{card_id}")
-    if (
-        not folder_name or folder_name in {".", ".."}
-        or folder_name.endswith((" ", "."))
-        or INVALID_FOLDER_CHARS.search(folder_name)
-        or folder_name.split(".", 1)[0].upper() in RESERVED_FOLDER_NAMES
-    ):
-        raise ValueError(f"无效或不安全的保存文件夹名：{folder_name!r}")
+    try:
+        model_id_from_input(card_id)
+    except ValueError:
+        raise ValueError(f"卡牌或模型 ID 格式不正确：{card_id}") from None
+    validate_name(folder_name)
 
 
 def _run_upstream(*args: str, quiet: bool = False) -> None:
@@ -63,6 +57,19 @@ def _run_upstream(*args: str, quiet: bool = False) -> None:
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(f"holodori-asset-tools 运行失败：{detail}")
+
+
+def _extract_bundle(source: Path, destination: Path) -> None:
+    from holodori_asset_tools.entrypoint.extract import AssetBundle
+
+    if platform.system() == "Android":
+        # UnityPy imports the FMOD audio toolkit while loading its texture converter.
+        # FMOD has no Android build, but these Live2D bundles contain no audio.
+        sys.modules.setdefault("fmod_toolkit", types.ModuleType("fmod_toolkit"))
+    try:
+        AssetBundle(source, source.name).extract(destination)
+    except Exception as error:
+        raise RuntimeError(f"资源包提取失败：{source.name}：{error}") from error
 
 
 def _catalog_entries(path: Path) -> set[str]:
@@ -120,6 +127,8 @@ def prepare(
     asset_id: str,
     *,
     output_name: str | None = None,
+    model_name: str | None = None,
+    card_info: dict | None = None,
     output_root: Path | None = None,
     cache_root: Path | None = None,
     catalog_path: Path | None = None,
@@ -134,6 +143,9 @@ def prepare(
 
     if output_name is not None:
         _batch_entry(asset_id, output_name)
+    if model_name is not None:
+        validate_name(model_name)
+    export_model_name = model_name
     model_id, character = model_id_from_input(asset_id)
     model_name = f"live2d_mdl_{model_id}"
     cache_root = (cache_root or Path.cwd() / "input" / ".holodori_assets").resolve()
@@ -141,6 +153,9 @@ def prepare(
     catalog = (catalog_path or cache_root / "octo_list.json").resolve()
     output_root = (output_root or Path.cwd() / "output").resolve()
     output_dir = output_root / (output_name or f"live2d_{model_id}")
+    if card_info is not None and output_dir.exists():
+        if export_owner(output_dir) != (card_info.get("export_id") or card_info["card_id"]):
+            raise ValueError(f"输出目录不属于此卡牌，请换一个目录：{output_dir}")
     cache_root.mkdir(parents=True, exist_ok=True)
     catalog.parent.mkdir(parents=True, exist_ok=True)
 
@@ -173,7 +188,7 @@ def prepare(
     with tempfile.TemporaryDirectory(prefix="live2d-extract-", dir=cache_root) as temp:
         extracted = Path(temp)
         for name in [model_name, *expressions]:
-            _run_upstream("extract", str(raw_bundles / name), str(extracted), quiet=True)
+            _extract_bundle(raw_bundles / name, extracted)
         model_dir = extracted / model_name
         if not model_dir.is_dir() or not any(model_dir.glob("*.png")):
             raise RuntimeError(f"模型包提取失败：{model_name}")
@@ -187,11 +202,15 @@ def prepare(
             model_dir, output_dir,
             motion_bundles=[raw_bundles / name for name in motions],
             force=force,
+            model_name=export_model_name,
         )
 
+    if card_info is not None:
+        from .master import write_atomic
+        write_atomic(output_dir / EXPORT_INFO, (json.dumps(card_info, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     summary["asset_id"] = model_id
     if output_name is not None:
-        summary["card_id"] = asset_id
+        summary["card_id"] = card_info["card_id"] if card_info else asset_id
         summary["output_name"] = output_name
     summary["output_dir"] = str(output_dir)
     if make_zip:
@@ -215,7 +234,7 @@ def prepare_batch(batch_file: Path, **options: object) -> dict:
             item["output_name"] = fields[1]
         try:
             if len(fields) != 2:
-                raise ValueError("每行应为：卡牌ID 自定义保存文件夹名")
+                raise ValueError("每行应为：卡牌/模型ID 自定义保存文件夹名")
             _batch_entry(fields[0], fields[1])
             folded_name = fields[1].casefold()
             if folded_name in used_names:
@@ -246,10 +265,15 @@ def main() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("asset_id", nargs="?", help="卡牌 ID 或模型 ID；批量模式时省略")
+    parser.add_argument("asset_id", nargs="?", help="卡牌名或角色名搜索词；也可直接输入卡牌/模型 ID")
+    parser.add_argument("--lang", choices=("chs", "cht"), default="chs", help="搜索语言：简中/繁中")
+    parser.add_argument("--character", help="按角色名或编号筛选搜索结果")
+    parser.add_argument("--pack-character", metavar="角色名或编号", help="下载角色全部模型，生成角色名.zip")
+    parser.add_argument("--refresh", action="store_true", help="刷新官方卡牌目录")
+    parser.add_argument("--app-version", default="1.2.1", help="官方主数据接口使用的客户端版本")
     parser.add_argument(
         "--batch", type=Path,
-        help="批量清单：每行一个卡牌 ID 和自定义保存文件夹名（允许空格）",
+        help="批量清单：每行一个卡牌/模型 ID 和自定义保存文件夹名（允许空格）",
     )
     parser.add_argument("-o", "--output-root", type=Path, help="输出根目录（默认当前目录/output）")
     parser.add_argument("--cache-root", type=Path, help="下载缓存（默认当前目录/input/.holodori_assets）")
@@ -261,10 +285,15 @@ def main() -> None:
     args = parser.parse_args()
     if args.batch is not None and args.asset_id is not None:
         parser.error("--batch 与单项 ID 不能同时使用")
-    if args.asset_id is None and args.batch is None:
-        if not sys.stdin.isatty():
-            parser.error("请指定卡牌 ID 或 --batch 文件")
-        args.asset_id = input("请输入目标 ID：").strip()
+    if args.pack_character is not None and (args.batch is not None or args.asset_id is not None or args.no_zip):
+        parser.error("--pack-character 不能与搜索词、--batch 或 --no-zip 同时使用")
+    direct_id = False
+    if args.asset_id is not None:
+        try:
+            model_id_from_input(args.asset_id)
+            direct_id = True
+        except ValueError:
+            pass
     try:
         options = dict(
             output_root=args.output_root,
@@ -274,14 +303,32 @@ def main() -> None:
             force=args.force,
             make_zip=not args.no_zip,
         )
-        result = (
-            prepare_batch(args.batch, **options)
-            if args.batch is not None else prepare(args.asset_id, **options)
-        )
-    except (ValueError, RuntimeError, OSError) as error:
+        if args.pack_character is not None:
+            from . import search
+            from .character_pack import download_character, resolve_character
+            cache = (args.cache_root or Path.cwd() / "input/.holodori_assets") / "master"
+            index = search.load_index(cache, language=args.lang, refresh=args.refresh, app_version=args.app_version)
+            result = download_character(resolve_character(index, args.pack_character), index, **options)
+        elif args.batch is not None:
+            result = prepare_batch(args.batch, **options)
+        elif direct_id:
+            result = prepare(args.asset_id, **options)
+        else:
+            from .interactive import run
+            result = run(args.asset_id, language=args.lang, character=args.character,
+                         refresh=args.refresh, app_version=args.app_version, **options)
+            if result and result["failed"]:
+                parser.exit(1)
+            return
+    except (KeyboardInterrupt, EOFError):
+        print("\n已取消。")
+        return
+    except ImportError:
+        parser.exit(1, '请先安装依赖：python -m pip install -e ".[assets]"\n')
+    except (ValueError, RuntimeError, OSError, httpx.HTTPError) as error:
         parser.exit(1, f"错误：{error}\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if args.batch is not None and result["failed"]:
+    if (args.batch is not None or args.pack_character is not None) and result["failed"]:
         parser.exit(1)
 
 

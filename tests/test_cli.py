@@ -43,15 +43,51 @@ def test_selects_only_matching_assets():
     assert motions == ["live2d_mot_idle-01_lv05_lp"]
 
 
+def test_extract_bundle_reports_upstream_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+
+    class FailingBundle:
+        def __init__(self, source, name):
+            pass
+
+        def extract(self, destination):
+            raise ValueError("broken texture")
+
+    extract = types.ModuleType("holodori_asset_tools.entrypoint.extract")
+    extract.AssetBundle = FailingBundle
+    monkeypatch.setitem(sys.modules, "holodori_asset_tools.entrypoint.extract", extract)
+    with pytest.raises(RuntimeError, match="资源包提取失败：live2d_mdl_test：broken texture"):
+        cli._extract_bundle(tmp_path / "live2d_mdl_test", tmp_path)
+
+
+def test_android_extract_does_not_require_fmod(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Android")
+    monkeypatch.delitem(sys.modules, "fmod_toolkit", raising=False)
+
+    class Bundle:
+        def __init__(self, source, name):
+            pass
+
+        def extract(self, destination):
+            assert isinstance(sys.modules["fmod_toolkit"], types.ModuleType)
+
+    extract = types.ModuleType("holodori_asset_tools.entrypoint.extract")
+    extract.AssetBundle = Bundle
+    monkeypatch.setitem(sys.modules, "holodori_asset_tools.entrypoint.extract", extract)
+    cli._extract_bundle(tmp_path / "live2d_mdl_test", tmp_path)
+    monkeypatch.delitem(sys.modules, "fmod_toolkit")
+
+
 @pytest.mark.parametrize(
-    "card_id,output_name",
+    "card_id,output_name,model_title",
     [
-        ("04016-5-uniq-0079-00", None),
-        ("04016-5-uniq-0079-00", "Fubuki Live2D v1.0"),
+        ("04016-5-uniq-0079-00", None, None),
+        ("04016-5-uniq-0079-00", "Fubuki Live2D v1.0", None),
+        ("04016-5-uniq-0079-00", "中文卡牌♡（角色）", "中文卡牌♡"),
     ],
 )
 def test_prepare_offline_with_synthetic_assets(
-    tmp_path, monkeypatch, card_id, output_name
+    tmp_path, monkeypatch, card_id, output_name, model_title
 ):
     model_name = "live2d_mdl_04016-uniq-0079-00"
     expression_name = "live2d_exp_smile-01_04016_000"
@@ -71,47 +107,56 @@ def test_prepare_offline_with_synthetic_assets(
 
     def fake_upstream(*args, quiet=False):
         calls.append(args[0])
-        if args[0] == "download":
-            raw = cache / "raw" / "assetbundles"
-            raw.mkdir(parents=True)
-            for name in (model_name, expression_name):
-                (raw / name).write_bytes(b"synthetic bundle")
-        elif args[0] == "extract":
-            name = Path(args[1]).name
-            folder = Path(args[2]) / name
-            folder.mkdir(parents=True)
-            if name == model_name:
-                (folder / "model.json").write_text(
-                    json.dumps({"m_Name": "04016_004", "_bytes": list(b"MOC3synthetic")}),
-                    encoding="utf-8",
-                )
-                (folder / "texture.png").write_bytes(b"synthetic PNG bytes")
-            else:
-                (folder / f"{name}.json").write_text(
-                    json.dumps(
-                        {
-                            "Type": "Live2D Expression",
-                            "FadeInTime": 0.2,
-                            "FadeOutTime": 0.3,
-                            "Parameters": [
-                                {"Id": "ParamAngleX", "Value": 0.5, "Blend": 1}
-                            ],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
+        raw = cache / "raw" / "assetbundles"
+        raw.mkdir(parents=True)
+        for name in (model_name, expression_name):
+            (raw / name).write_bytes(b"synthetic bundle")
+
+    def fake_extract(source, destination):
+        calls.append("extract")
+        name = source.name
+        folder = destination / name
+        folder.mkdir(parents=True)
+        if name == model_name:
+            (folder / "model.json").write_text(
+                json.dumps({"m_Name": "04016_004", "_bytes": list(b"MOC3synthetic")}),
+                encoding="utf-8",
+            )
+            (folder / "texture.png").write_bytes(b"synthetic PNG bytes")
+        else:
+            (folder / f"{name}.json").write_text(
+                json.dumps(
+                    {
+                        "Type": "Live2D Expression",
+                        "FadeInTime": 0.2,
+                        "FadeOutTime": 0.3,
+                        "Parameters": [
+                            {"Id": "ParamAngleX", "Value": 0.5, "Blend": 1}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
     monkeypatch.setattr(cli, "_run_upstream", fake_upstream)
+    monkeypatch.setattr(cli, "_extract_bundle", fake_extract)
     result = cli.prepare(
         card_id,
         output_name=output_name,
+        model_name=model_title,
+        card_info={"card_id": card_id, "card_name": model_title} if model_title else None,
         output_root=tmp_path / "output",
         cache_root=cache,
         motion_level=None,
     )
     model = json.loads(Path(result["model"]).read_text(encoding="utf-8"))
     texture_ref = model["FileReferences"]["Textures"][0]
-    assert texture_ref == "04016_004.4096/texture.png"
+    basename = model_title or "04016_004"
+    assert texture_ref == f"{basename}.4096/texture.png"
+    assert Path(result["model"]).name == f"{basename}.model3.json"
+    assert (Path(result["output_dir"]) / model["FileReferences"]["Moc"]).read_bytes() == b"MOC3synthetic"
+    if model_title:
+        assert cli.export_owner(Path(result["output_dir"])) == card_id
     assert (Path(result["output_dir"]) / texture_ref).read_bytes() == b"synthetic PNG bytes"
     assert result["expressions"] == 1
     assert result["motions"] == 0
@@ -124,7 +169,7 @@ def test_prepare_offline_with_synthetic_assets(
     assert Path(result["zip"]).name == folder_name + ".zip"
     with zipfile.ZipFile(result["zip"]) as archive:
         assert archive.testzip() is None
-        assert f"{folder_name}/04016_004.model3.json" in archive.namelist()
+        assert f"{folder_name}/{basename}.model3.json" in archive.namelist()
 
 
 def test_batch_accepts_spaces_and_continues_after_errors(tmp_path, monkeypatch):
@@ -152,6 +197,27 @@ def test_batch_accepts_spaces_and_continues_after_errors(tmp_path, monkeypatch):
     assert calls == [
         ("04016-5-uniq-0079-00", "Fubuki Live2D v1.0"),
         ("04016-5-uniq-0080-00", "Another Model #1"),
+    ]
+
+
+def test_batch_accepts_live2d_resource_names(tmp_path, monkeypatch):
+    batch = tmp_path / "batch.txt"
+    batch.write_text(
+        "live2d_mdl_00009-nrml-0009-00 live2d_00009-nrml-0009-00\n"
+        "live2d_mdl_00024-nrml-0020-00 live2d_00024-nrml-0020-00\n",
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        cli, "prepare", lambda asset_id, **options: calls.append(
+            (asset_id, options["output_name"])
+        ) or {},
+    )
+    result = cli.prepare_batch(batch)
+    assert result["failed"] == 0
+    assert calls == [
+        ("live2d_mdl_00009-nrml-0009-00", "live2d_00009-nrml-0009-00"),
+        ("live2d_mdl_00024-nrml-0020-00", "live2d_00024-nrml-0020-00"),
     ]
 
 
