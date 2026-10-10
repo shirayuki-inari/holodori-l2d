@@ -69,7 +69,9 @@ def test_official_refresh_then_offline_cache_and_failed_refresh(tmp_path, monkey
     monkeypatch.setattr(master, "read_table", lambda client, pack, schema, root: tables[required[pack["type"]]])
     monkeypatch.setattr(master, "fetch_models", lambda client: (99, set()))
     # Existing card-only caches are upgraded automatically.
-    (tmp_path / "cards-chs.json").write_text(json.dumps({"schema_version": 1, "language": "chs", "cards": []}))
+    (tmp_path / "cards-chs.json").write_text(
+        json.dumps({"schema_version": 1, "language": "chs", "cards": []}), encoding="utf-8",
+    )
     index = search.load_index(tmp_path)
     assert index["schema_version"] == 2
     assert index["models"] == []
@@ -84,7 +86,7 @@ def test_official_refresh_then_offline_cache_and_failed_refresh(tmp_path, monkey
     assert search.load_index(tmp_path) == index
     with pytest.raises(RuntimeError, match="offline"):
         search.load_index(tmp_path, refresh=True)
-    assert json.loads((tmp_path / "cards-chs.json").read_text()) == index
+    assert json.loads((tmp_path / "cards-chs.json").read_text(encoding="utf-8")) == index
     with pytest.raises(RuntimeError, match="offline"):
         search.load_index(tmp_path, language="cht")  # Never reuse the wrong language.
 
