@@ -187,6 +187,17 @@ def test_prepare_offline_with_synthetic_assets(
             assert image.format == "JPEG" and image.size == (8, 8)
     else:
         assert "icon" not in result
+    vtube_file = Path(result["vtube"])
+    assert vtube_file == Path(result["output_dir"]) / f"{basename}.vtube.json"
+    vtube = json.loads(vtube_file.read_text(encoding="utf-8"))
+    assert vtube == {
+        "Version": 1, "Name": basename, "ModelID": "",
+        "FileReferences": {
+            "Icon": "icon.jpg" if with_thumbnail else "",
+            "Model": f"{basename}.model3.json",
+            "IdleAnimation": "", "IdleAnimationWhenTrackingLost": "",
+        },
+    }
     folder_name = output_name or "live2d_04016-uniq-0079-00"
     assert Path(result["output_dir"]).name == folder_name
     assert Path(result["zip"]).name == folder_name + ".zip"
@@ -194,6 +205,7 @@ def test_prepare_offline_with_synthetic_assets(
         assert archive.testzip() is None
         assert f"{folder_name}/{basename}.model3.json" in archive.namelist()
         assert (f"{folder_name}/icon.jpg" in archive.namelist()) == with_thumbnail
+        assert json.loads(archive.read(f"{folder_name}/{basename}.vtube.json")) == vtube
 
 
 def test_batch_accepts_spaces_and_continues_after_errors(tmp_path, monkeypatch):

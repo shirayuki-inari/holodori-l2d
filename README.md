@@ -49,6 +49,7 @@ holodori-l2d --refresh
 output/
 ├─ 独占宝物♡水力加农炮/
 │  ├─ 独占宝物♡水力加农炮.model3.json
+│  ├─ 独占宝物♡水力加农炮.vtube.json
 │  ├─ 独占宝物♡水力加农炮.moc3
 │  ├─ 独占宝物♡水力加农炮.physics3.json
 │  ├─ icon.jpg
@@ -58,9 +59,11 @@ output/
 └─ 独占宝物♡水力加农炮.zip
 ```
 
-将整个模型文件夹复制到 VTube Studio 的 `Live2DModels/`，首次导入以卡牌名作为模型名称（由同名 `.model3.json` 创建 VTS 配置）。同名卡牌的文件夹追加角色名，仍冲突时追加 ID；模型文件名仍使用卡牌名。Windows 禁用符号转换为全角符号，过长名称会截短。目录中的 `.holodori-model.json` 记录卡牌归属，以便重跑时识别已导出的模型。
+将整个模型文件夹复制到 VTube Studio 的 `Live2DModels/`，下载时生成的同名 `.vtube.json` 提供模型名称和文件引用。同名卡牌的文件夹追加角色名，仍冲突时追加 ID；模型文件名仍使用卡牌名。Windows 禁用符号转换为全角符号，过长名称会截短。目录中的 `.holodori-model.json` 记录卡牌归属，以便重跑时识别已导出的模型。
 
 下载时会同时获取对应卡牌的 `img_card_live_thumb_*` 图片包，提取并转换为真正的 JPEG，保存为模型目录中的 **`icon.jpg`**，新生成的单模型 ZIP 和角色整包也会包含它。保持原图尺寸；透明区域以白色填充。搜索/角色打包按对应卡牌 ID 精确匹配；直接按模型 ID 下载时，仅在缩略图匹配唯一时使用。没有卡牌或找不到唯一对应缩略图时会提示跳过，不借用其他卡牌图片。已有不同内容的 `icon.jpg` 不会覆盖，需加 `--force`；更新已有单模型 ZIP 同样需要 `--force`。
+
+同时生成 **`模型名.vtube.json`**：`Version` 为 1，`Name` 使用实际模型文件名，`ModelID` 留空，`FileReferences.Model` 指向同名 `.model3.json`，有图标时 `FileReferences.Icon` 为 `icon.jpg`，否则留空；两个待机动画引用留空。配置使用标准 JSON 序列化，新生成的 ZIP 也包含该文件。已有同名配置即使加 `--force` 也不会被重写，以保留 VTube Studio 中设置的追踪参数和热键；如需为已有配置启用图标，请自行将其中的 `FileReferences.Icon` 设为 `icon.jpg`。
 
 ## 角色全模型打包
 
@@ -173,7 +176,7 @@ holodori-l2d-rebuild "D:\extracted\live2d_mdl_04016-uniq-0079-00" -o "D:\exports
 - 表情的参数 ID、数值、混合方式、淡变时间由游戏包转换为 `.exp3.json`；`04016` 示例已逐项比对。
 - 物理配置从 Unity 序列化数据重建。少数原始组名可能因提取时字符解码而使用占位名，数值不因此改变。
 - `.motion3.json` 是由 Unity `AnimationClip` 的参数曲线反向重建，数值被舍入到 5 位小数，过渡时间统一设为 0.5 秒。它可用于预览，**不保证与游戏内播放完全一致，也不是原始 motion3 文件的无损副本**。
-- 不包含 VTube Studio 的 `.vtube.json` 配置、面部追踪参数映射或热键设置，导入后需要自行配置。文件结构和引用已验证；不代表已在所有播放器或操作系统中完成实机验证。
+- 下载导出时仅生成 VTube Studio 的最小 `.vtube.json` 元数据，不包含面部追踪参数映射或热键设置，导入后需要自行配置。底层 `holodori-l2d-rebuild` 不生成该配置。文件结构和引用已验证；不代表已在所有播放器或操作系统中完成实机验证。
 
 ## 公开范围与许可
 

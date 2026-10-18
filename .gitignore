@@ -26,6 +26,7 @@ dist/
 *.physics3.json
 *.exp3.json
 *.motion3.json
+*.vtube.json
 t_live2d_*_texture_*.png
 *.usm
 *.zip

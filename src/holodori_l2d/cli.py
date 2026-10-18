@@ -19,6 +19,7 @@ import httpx
 from .rebuild import rebuild
 from .naming import EXPORT_INFO, export_owner, validate_name
 from .icon import card_thumbnail_name, save_icon, select_thumbnail
+from .vtube import ensure_config
 
 
 CARD_ID = re.compile(r"^(\d{5})-(?:\d+-)?([a-z0-9]+)-(\d{4})-(\d{2})$")
@@ -219,6 +220,7 @@ def prepare(
             summary["icon"] = str(save_icon(extracted / thumbnail, output_dir, force=force))
             summary["icon_asset"] = thumbnail
 
+    summary["vtube"] = str(ensure_config(Path(summary["model"])))
     if card_info is not None:
         from .master import write_atomic
         write_atomic(output_dir / EXPORT_INFO, (json.dumps(card_info, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
