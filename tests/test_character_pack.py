@@ -35,6 +35,9 @@ def prepare(monkeypatch):
         name = options["model_name"]
         (folder / (name + ".model3.json")).write_text(json.dumps({"FileReferences": {"Moc": name + ".moc3"}}))
         (folder / (name + ".moc3")).write_bytes(b"MOC3synthetic")
+        if options["card_info"]["card_id"]:
+            from PIL import Image
+            Image.new("RGB", (8, 8)).save(folder / "icon.jpg")
         (folder / ".holodori-model.json").write_text(json.dumps(options["card_info"]))
         return {"output_dir": str(folder), "asset_id": asset_id.removeprefix("live2d_mdl_")}
 
@@ -55,6 +58,8 @@ def test_pack_contains_all_unique_models_not_just_search_matches(tmp_path, index
         assert not any("卡牌乙" in name for name in archive.namelist())
         assert "默认/默认.model3.json" in archive.namelist()
         assert archive.read("默认/默认.moc3") == b"MOC3synthetic"
+        assert "卡牌甲/icon.jpg" in archive.namelist()
+        assert "默认/icon.jpg" not in archive.namelist()
     # Reruns reuse model folders (including no-card models) and update the owned ZIP.
     again = character_pack.download_character("chr-00001", index, output_root=tmp_path)
     assert again["zip"] == result["zip"]

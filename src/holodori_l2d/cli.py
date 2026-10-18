@@ -18,6 +18,7 @@ import httpx
 
 from .rebuild import rebuild
 from .naming import EXPORT_INFO, export_owner, validate_name
+from .icon import card_thumbnail_name, save_icon, select_thumbnail
 
 
 CARD_ID = re.compile(r"^(\d{5})-(?:\d+-)?([a-z0-9]+)-(\d{4})-(\d{2})$")
@@ -148,6 +149,8 @@ def prepare(
     export_model_name = model_name
     model_id, character = model_id_from_input(asset_id)
     model_name = f"live2d_mdl_{model_id}"
+    thumbnail_input = card_info.get("card_id") if card_info is not None else asset_id
+    expected_thumbnail = card_thumbnail_name(thumbnail_input)
     cache_root = (cache_root or Path.cwd() / "input" / ".holodori_assets").resolve()
     raw_bundles = cache_root / "raw" / "assetbundles"
     catalog = (catalog_path or cache_root / "octo_list.json").resolve()
@@ -160,21 +163,27 @@ def prepare(
     catalog.parent.mkdir(parents=True, exist_ok=True)
 
     # The upstream catalog loader fetches only when its cache is absent.
-    # Refresh the default cache once if this ID was added after it was saved.
+    # Refresh once if the model or its exact card thumbnail is newer than the cache.
     from holodori_asset_tools import catalog as upstream_catalog
 
     upstream_catalog.get(catalog)
     names = _catalog_entries(catalog)
-    if model_name not in names and catalog_path is None:
-        print("缓存索引没有这个模型，正在获取最新索引……")
+    if catalog_path is None and (model_name not in names or
+                                (expected_thumbnail is not None and expected_thumbnail not in names)):
+        print("缓存索引没有这个模型或卡牌缩略图，正在获取最新索引……")
         upstream_catalog.fetch().save(catalog)
         names = _catalog_entries(catalog)
     expressions, motions = _selected_assets(names, model_id, character, motion_level)
+    thumbnail = select_thumbnail(names, thumbnail_input)
+    if thumbnail is None:
+        print("未找到唯一对应的卡牌缩略图，跳过 icon.jpg。", flush=True)
     selected = [model_name, *expressions, *motions]
+    if thumbnail is not None:
+        selected.append(thumbnail)
     pattern = "^(?:" + "|".join(map(re.escape, selected)) + ")$"
 
     print(
-        f"下载/检查：1 个模型、{len(expressions)} 个表情、{len(motions)} 个候选动作",
+        f"下载/检查：1 个模型、{len(expressions)} 个表情、{len(motions)} 个候选动作、{int(thumbnail is not None)} 张卡牌缩略图",
         flush=True,
     )
     _run_upstream(
@@ -198,12 +207,17 @@ def prepare(
         ]
         if missing_expressions:
             raise RuntimeError("表情包提取失败：" + ", ".join(missing_expressions))
+        if thumbnail is not None:
+            _extract_bundle(raw_bundles / thumbnail, extracted)
         summary = rebuild(
             model_dir, output_dir,
             motion_bundles=[raw_bundles / name for name in motions],
             force=force,
             model_name=export_model_name,
         )
+        if thumbnail is not None:
+            summary["icon"] = str(save_icon(extracted / thumbnail, output_dir, force=force))
+            summary["icon_asset"] = thumbnail
 
     if card_info is not None:
         from .master import write_atomic

@@ -21,8 +21,9 @@ classifiers = [
 [project.optional-dependencies]
 assets = [
   "holodori-asset-tools @ git+https://github.com/HolodoriDB/holodori-asset-tools.git@13f150fe9dfbd367be53e5ea1c0a4ceb258b74f2",
+  "Pillow>=10",
 ]
-test = ["pytest>=8,<10"]
+test = ["pytest>=8,<10", "Pillow>=10"]
 search = []
 
 [project.scripts]

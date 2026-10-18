@@ -82,19 +82,25 @@ def test_android_extract_does_not_require_fmod(tmp_path, monkeypatch):
     "card_id,output_name,model_title",
     [
         ("04016-5-uniq-0079-00", None, None),
+        ("card-04016-5-uniq-0079-00", None, None),
+        ("04016-uniq-0079-00", None, None),
+        ("live2d_mdl_04016-uniq-0079-00", None, None),
         ("04016-5-uniq-0079-00", "Fubuki Live2D v1.0", None),
         ("04016-5-uniq-0079-00", "中文卡牌♡（角色）", "中文卡牌♡"),
     ],
 )
+@pytest.mark.parametrize("with_thumbnail", [True, False])
 def test_prepare_offline_with_synthetic_assets(
-    tmp_path, monkeypatch, card_id, output_name, model_title
+    tmp_path, monkeypatch, card_id, output_name, model_title, with_thumbnail
 ):
     model_name = "live2d_mdl_04016-uniq-0079-00"
     expression_name = "live2d_exp_smile-01_04016_000"
+    thumbnail_name = "img_card_live_thumb_04016-5-uniq-0079-00"
+    selected = [model_name, expression_name] + ([thumbnail_name] if with_thumbnail else [])
     cache = tmp_path / "cache"
     cache.mkdir()
     (cache / "octo_list.json").write_text(
-        json.dumps({"assetBundles": [{"name": model_name}, {"name": expression_name}]}),
+        json.dumps({"assetBundles": [{"name": name} for name in selected]}),
         encoding="utf-8",
     )
     fake_catalog = types.SimpleNamespace(get=lambda path: None)
@@ -107,9 +113,12 @@ def test_prepare_offline_with_synthetic_assets(
 
     def fake_upstream(*args, quiet=False):
         calls.append(args[0])
+        import re
+        pattern = args[args.index("--filter") + 1]
+        assert all(re.fullmatch(pattern, name) for name in selected)
         raw = cache / "raw" / "assetbundles"
         raw.mkdir(parents=True)
-        for name in (model_name, expression_name):
+        for name in selected:
             (raw / name).write_bytes(b"synthetic bundle")
 
     def fake_extract(source, destination):
@@ -123,6 +132,9 @@ def test_prepare_offline_with_synthetic_assets(
                 encoding="utf-8",
             )
             (folder / "texture.png").write_bytes(b"synthetic PNG bytes")
+        elif name == thumbnail_name:
+            from PIL import Image
+            Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(folder / (name + ".png"))
         else:
             (folder / f"{name}.json").write_text(
                 json.dumps(
@@ -147,6 +159,7 @@ def test_prepare_offline_with_synthetic_assets(
         card_info={"card_id": card_id, "card_name": model_title} if model_title else None,
         output_root=tmp_path / "output",
         cache_root=cache,
+        catalog_path=None if with_thumbnail else cache / "octo_list.json",
         motion_level=None,
     )
     model = json.loads(Path(result["model"]).read_text(encoding="utf-8"))
@@ -163,13 +176,24 @@ def test_prepare_offline_with_synthetic_assets(
     if output_name is not None:
         assert result["card_id"] == card_id
         assert result["output_name"] == output_name
-    assert calls == ["download", "extract", "extract"]
+    assert calls == ["download", "extract", "extract"] + (["extract"] if with_thumbnail else [])
+    icon = Path(result["output_dir"]) / "icon.jpg"
+    assert icon.is_file() == with_thumbnail
+    if with_thumbnail:
+        from PIL import Image
+        assert result["icon"] == str(icon)
+        assert result["icon_asset"] == thumbnail_name
+        with Image.open(icon) as image:
+            assert image.format == "JPEG" and image.size == (8, 8)
+    else:
+        assert "icon" not in result
     folder_name = output_name or "live2d_04016-uniq-0079-00"
     assert Path(result["output_dir"]).name == folder_name
     assert Path(result["zip"]).name == folder_name + ".zip"
     with zipfile.ZipFile(result["zip"]) as archive:
         assert archive.testzip() is None
         assert f"{folder_name}/{basename}.model3.json" in archive.namelist()
+        assert (f"{folder_name}/icon.jpg" in archive.namelist()) == with_thumbnail
 
 
 def test_batch_accepts_spaces_and_continues_after_errors(tmp_path, monkeypatch):
