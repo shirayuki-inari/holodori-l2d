@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import types
 import zipfile
@@ -198,6 +199,9 @@ def test_prepare_offline_with_synthetic_assets(
             "IdleAnimation": "", "IdleAnimationWhenTrackingLost": "",
         },
     }
+    info = json.loads((Path(result["output_dir"]) / ".holodori-model.json").read_text(encoding="utf-8"))
+    assert f"{basename}.model3.json" in info["files"] and "files" not in result
+    assert f"{basename}.vtube.json" not in info["files"]  # User settings are never cleaned up.
     folder_name = output_name or "live2d_04016-uniq-0079-00"
     assert Path(result["output_dir"]).name == folder_name
     assert Path(result["zip"]).name == folder_name + ".zip"
@@ -298,3 +302,71 @@ def test_batch_cli_returns_failure_exit_code(tmp_path, monkeypatch, capsys):
         cli.main()
     assert exit_info.value.code == 1
     assert '"failed": 1' in capsys.readouterr().out
+
+
+def test_remove_stale_only_deletes_previously_generated_files(tmp_path):
+    folder = tmp_path / "model"
+    (folder / "motions").mkdir(parents=True)
+    (folder / "motions" / "old.motion3.json").write_text("{}")
+    (folder / "model.moc3").write_bytes(b"MOC3")
+    (folder / "user-notes.txt").write_text("keep")
+    (folder / "model.vtube.json").write_text("{}")
+    (tmp_path / "outside.txt").write_text("keep")
+    (folder / ".holodori-model.json").write_text(json.dumps({"files": [
+        "model.moc3", "motions/old.motion3.json", "../outside.txt"]}))
+    assert cli._remove_stale(folder, ["model.moc3"]) == ["../outside.txt", "motions/old.motion3.json"]
+    assert not (folder / "motions").exists()  # Emptied generated folders are removed too.
+    assert (folder / "model.moc3").exists() and (folder / "user-notes.txt").exists()
+    assert (folder / "model.vtube.json").exists() and (tmp_path / "outside.txt").exists()
+    # Exports from older versions carry no file list, so nothing is removed.
+    (folder / ".holodori-model.json").write_text(json.dumps({"card_id": "card-x"}))
+    assert cli._remove_stale(folder, []) == []
+
+
+def test_download_skips_cached_bundles(tmp_path, monkeypatch):
+    raw = tmp_path / "raw" / "assetbundles"
+    raw.mkdir(parents=True)
+    (raw / "cached").write_bytes(b"bundle")
+    calls = []
+
+    def upstream(*args):
+        calls.append(args[args.index("--filter") + 1])
+        (raw / "missing").write_bytes(b"bundle")
+
+    monkeypatch.setattr(cli, "_run_upstream", upstream)
+    cli._download(tmp_path, tmp_path / "catalog.json", ["cached"])
+    assert calls == []
+    cli._download(tmp_path, tmp_path / "catalog.json", ["cached", "missing"])
+    assert calls == ["^(?:missing)$"]
+
+
+def test_prefetch_downloads_several_models_in_one_call(tmp_path, monkeypatch, capsys):
+    names = ["live2d_mdl_00001-uniq-0001-00", "live2d_mdl_00002-uniq-0002-00",
+             "live2d_exp_smile_00001_000", "live2d_mot_idle-01_lv05",
+             "img_card_live_thumb_00001-5-uniq-0001-00"]
+    (tmp_path / "octo_list.json").write_text(json.dumps({"assetBundles": [{"name": n} for n in names]}))
+    package = types.ModuleType("holodori_asset_tools")
+    refreshed = []
+    package.catalog = types.SimpleNamespace(
+        get=lambda path: None,
+        fetch=lambda: types.SimpleNamespace(save=lambda path: refreshed.append(path)),
+    )
+    monkeypatch.setitem(sys.modules, "holodori_asset_tools", package)
+    monkeypatch.setattr(cli.importlib.util, "find_spec", lambda name: object())
+    patterns = []
+
+    def upstream(*args):
+        patterns.append(args[args.index("--filter") + 1])
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(cli, "_run_upstream", upstream)
+    models = [(names[0], "card-00001-5-uniq-0001-00"), (names[1], None),
+              ("live2d_mdl_00009-uniq-0009-00", None)]  # Not in the catalog: left to prepare.
+    cli.prefetch(models, cache_root=tmp_path, motion_level="lv05")
+    assert refreshed == [tmp_path / "octo_list.json"]  # Unknown model: catalog refreshed once.
+    assert len(patterns) == 1
+    assert all(re.fullmatch(patterns[0], name) for name in names)
+    assert "00009" not in patterns[0]
+    assert "network down" in capsys.readouterr().out  # Reported, not raised.
+    cli.prefetch(models[:1], cache_root=tmp_path)
+    assert len(patterns) == 1  # A single model needs no separate prefetch.

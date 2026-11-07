@@ -20,10 +20,13 @@ def resolve_character(index: dict, query: str) -> str:
     if not query:
         raise ValueError("角色名或编号不能为空")
     characters = {r["character_id"]: character_label(r) for r in index["models"]}
-    exact = [cid for cid, name in characters.items()
-             if query in {normalize(name), normalize(cid), cid.removeprefix("chr-")}]
-    matches = exact or [cid for cid, name in characters.items()
-                        if query in normalize(name) or query in normalize(cid)]
+    keys = {}  # Normalized localized/English names and IDs of each character.
+    for row in index["models"]:
+        cid = row["character_id"]
+        keys.setdefault(cid, {normalize(cid), cid.removeprefix("chr-")})
+        keys[cid].update(normalize(name) for name in (row.get("character"), row.get("character_en")) if name)
+    exact = [cid for cid, names in keys.items() if query in names]
+    matches = exact or [cid for cid, names in keys.items() if any(query in name for name in names)]
     if len(matches) == 1:
         return matches[0]
     if not matches:
@@ -71,12 +74,16 @@ def make_character_zip(root: Path, character_id: str, name: str,
     return write_zip(_archive_path(root, character_id, name), folders, {MANIFEST: json_bytes(manifest)})
 
 
+def character_models(index: dict, character_id: str) -> list[dict]:
+    """Every catalog model of a character, unique by resource, not just search matches."""
+    return list({r["resource_name"]: r for r in index["models"]
+                 if r["character_id"] == character_id and r["model_exists"]}.values())
+
+
 def download_character(character_id: str, index: dict, **options) -> dict:
     from .interactive import download_cards
 
-    # Models come from the full catalog, not the current search results.
-    rows = list({r["resource_name"]: r for r in index["models"]
-                 if r["character_id"] == character_id and r["model_exists"]}.values())
+    rows = character_models(index, character_id)
     if not rows:
         raise ValueError(f"资源目录中未找到此角色的模型：{character_id}")
     name = character_label(rows[0])

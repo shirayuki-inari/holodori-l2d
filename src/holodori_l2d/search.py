@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +21,11 @@ SCHEMAS = {
     "Lang": {1: "id", 1000: "text"},
 }
 LANGUAGES = {"chs": "Chs", "cht": "Cht"}
+SCHEMA_VERSION = 3  # 3 adds character_en
+READABLE_SCHEMAS = {2, SCHEMA_VERSION}  # Usable offline when an automatic upgrade fails.
 TABLES = ("Card", "Costume", "Character", "LangCard", "LangCharacter", "LangCostume")
-QUERY_KEYS = ("name", "character", "character_id")
-CHARACTER_KEYS = ("character", "character_id")
+QUERY_KEYS = ("name", "character", "character_en", "character_id")
+CHARACTER_KEYS = ("character", "character_en", "character_id")
 
 
 def downloadable(row: dict) -> bool:
@@ -37,10 +40,10 @@ def _by_id(rows: list[dict]) -> dict[str, dict]:
     return {row["id"]: row for row in rows}
 
 
-def _character_names(tables: dict[str, list[dict]]) -> dict[str, str | None]:
-    """Map character IDs to localized names, falling back to English."""
+def _character_names(tables: dict[str, list[dict]]) -> dict[str, tuple[str | None, str | None]]:
+    """Map character IDs to (localized name falling back to English, English name)."""
     texts = {row["id"]: row.get("text") for row in tables["LangCharacter"]}
-    return {row["id"]: texts.get(row.get("name_lang_id")) or row.get("name_eng")
+    return {row["id"]: (texts.get(row.get("name_lang_id")) or row.get("name_eng"), row.get("name_eng"))
             for row in tables["Character"]}
 
 
@@ -57,9 +60,11 @@ def join_cards(tables: dict[str, list[dict]], models: set[str]) -> list[dict]:
             model_id = card_model_id(card.get("asset_id", ""))
             source = "card_asset_convention"
         resource = f"live2d_mdl_{model_id}" if model_id else None
+        character, english = characters.get(card.get("character_id"), (None, None))
         results.append({
             "name": names.get(card.get("name_lang_id")) or None,
-            "character": characters.get(card.get("character_id")),
+            "character": character,
+            "character_en": english,
             "character_id": card.get("character_id"),
             "card_id": card["id"],
             "model_id": model_id,
@@ -86,9 +91,11 @@ def join_models(tables: dict[str, list[dict]], models: set[str], cards: list[dic
         model_id = resource.removeprefix("live2d_mdl_")
         character_id = "chr-" + model_id.split("-", 1)[0]
         costume = costumes.get(model_id, {})
+        character, english = characters.get(character_id, (None, None))
         result.append({
             "name": costume_names.get(costume.get("name_lang_id")) or model_id,
-            "character": characters.get(character_id) or character_id,
+            "character": character or character_id,
+            "character_en": english,
             "character_id": character_id, "card_id": None, "model_id": model_id,
             "resource_name": resource, "model_exists": True, "mapping_source": "catalog_costume",
         })
@@ -100,13 +107,27 @@ def load_index(cache_root: Path, *, language: str = "chs", refresh: bool = False
     if language not in LANGUAGES:
         raise ValueError("语言应为 chs 或 cht")
     path = cache_root / f"cards-{language}.json"
+    cached = {}
     if path.exists() and not refresh:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("schema_version") not in (1, 2) or data.get("language") != language:
-            raise ValueError("卡牌索引缓存格式不兼容，请加 --refresh 重建")
-        if data["schema_version"] == 2:
-            return data
-        # Upgrade the old card-only cache automatically; save only after success.
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+        if cached.get("language") != language:
+            cached = {}
+        elif cached.get("schema_version") == SCHEMA_VERSION:
+            return cached
+    # Rebuild an old or damaged cache automatically; it is replaced only after success.
+    try:
+        return _fetch_index(path, cache_root, language, app_version)
+    except Exception as error:
+        if cached.get("schema_version") not in READABLE_SCHEMAS:
+            raise
+        print(f"卡牌目录升级失败，暂用旧缓存（部分搜索功能不可用）：{error}", file=sys.stderr)
+        return cached
+
+
+def _fetch_index(path: Path, cache_root: Path, language: str, app_version: str) -> dict:
     import httpx
 
     manifest = master.fetch_master(language, app_version)
@@ -126,7 +147,7 @@ def load_index(cache_root: Path, *, language: str = "chs", refresh: bool = False
     if not rows or any(row["name"] is None for row in rows):
         raise ValueError("卡牌名称表为空或有缺失，未更新缓存")
     data = {
-        "schema_version": 2, "language": language,
+        "schema_version": SCHEMA_VERSION, "language": language,
         "master_version": manifest["version"], "catalog_revision": revision,
         "fetched_at": datetime.now(timezone.utc).isoformat(), "cards": rows,
         "models": join_models(tables, models, rows),

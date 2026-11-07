@@ -7,6 +7,7 @@ JSON. Unity AnimationClips are reconstructed as approximate motion3.json files.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import re
@@ -22,10 +23,6 @@ from .util import json_bytes, use_utf8_stdio, write_checked
 BLENDS = {0: "Overwrite", 1: "Add", 2: "Multiply"}
 COMPONENTS = {0: "X", 1: "Y", 2: "Angle"}
 GROUPS = {"EyeBlink": ("ParamEyeLOpen", "ParamEyeROpen"), "LipSync": ("ParamMouthOpenY",)}
-
-
-def _write_json(path: Path, value: object, *, force: bool) -> None:
-    write_checked(path, json_bytes(value), force=force)
 
 
 def _vector(value: dict[str, float]) -> dict[str, float]:
@@ -244,8 +241,18 @@ def _motion_json(bundle_path: Path) -> tuple[str, dict]:
     return clip["m_Name"], motion
 
 
-def _write_expressions(model_dir: Path, char_id: str, output_dir: Path, *,
-                       force: bool) -> tuple[list[dict], set[str]]:
+@functools.lru_cache(maxsize=None)
+def _cached_motion(path: Path, mtime_ns: int, size: int) -> tuple[str, dict]:
+    return _motion_json(path)
+
+
+def _convert_motion(bundle: Path) -> tuple[str, dict]:
+    """Convert each shared motion bundle once per process, e.g. across a character pack."""
+    stat = bundle.stat()
+    return _cached_motion(bundle.resolve(), stat.st_mtime_ns, stat.st_size)
+
+
+def _write_expressions(model_dir: Path, char_id: str, write_json) -> tuple[list[dict], set[str]]:
     """Convert this character's extracted expressions; return references and parameter IDs."""
     expressions, parameter_ids = [], set()
     for folder in sorted(model_dir.parent.glob(f"live2d_exp_*_{char_id}_000")):
@@ -259,23 +266,23 @@ def _write_expressions(model_dir: Path, char_id: str, output_dir: Path, *,
         params = [{"Id": x["Id"], "Value": x["Value"], "Blend": BLENDS[x["Blend"]]} for x in data["Parameters"]]
         parameter_ids.update(x["Id"] for x in params)
         file = f"expressions/{label}.exp3.json"
-        _write_json(output_dir / file, {
+        write_json(file, {
             "Type": "Live2D Expression", "FadeInTime": data["FadeInTime"],
             "FadeOutTime": data["FadeOutTime"], "Parameters": params,
-        }, force=force)
+        })
         expressions.append({"Name": label, "File": file})
     return expressions, parameter_ids
 
 
-def _write_motions(bundles, output_dir: Path, *, force: bool) -> dict[str, list[dict]]:
+def _write_motions(bundles, write_json) -> dict[str, list[dict]]:
     """Convert motion bundles, grouped as Idle or by their motion-name prefix."""
     motions: dict[str, list[dict]] = {}
     for bundle in bundles:
-        name, motion = _motion_json(bundle)
+        name, motion = _convert_motion(bundle)
         if not re.fullmatch(r"[\w.-]+", name):
             raise ValueError(f"不安全的动作文件名：{name!r}")
         file = f"motions/{name}.motion3.json"
-        _write_json(output_dir / file, motion, force=force)
+        write_json(file, motion)
         group = "Idle" if "_idle-" in name else name.removeprefix("live2d_mot_").split("-", 1)[0].capitalize()
         motions.setdefault(group, []).append({"File": file, "FadeInTime": 0.5, "FadeOutTime": 0.5})
     return motions
@@ -297,6 +304,14 @@ def rebuild(
     if not match:
         raise ValueError("模型目录名应为 live2d_mdl_<角色编号>-... 格式")
     char_id = match.group(1)
+    files: list[str] = []
+
+    def write(relative: str, data: bytes) -> None:
+        write_checked(output_dir / relative, data, force=force)
+        files.append(relative)
+
+    def write_json(relative: str, value: object) -> None:
+        write(relative, json_bytes(value))
 
     model_source = None
     rig = None
@@ -313,14 +328,14 @@ def rebuild(
     model_name = model_source["m_Name"] if model_name is None else model_name
     validate_name(model_name)
     moc_name = model_name + ".moc3"
-    write_checked(output_dir / moc_name, bytes(model_source["_bytes"]), force=force)
+    write(moc_name, bytes(model_source["_bytes"]))
 
     textures = sorted(model_dir.glob("*.png"))
     if not textures:
         raise ValueError("模型包内未找到纹理 PNG")
     texture_folder = model_name + ".4096"
     for source in textures:
-        write_checked(output_dir / texture_folder / source.name, source.read_bytes(), force=force)
+        write(f"{texture_folder}/{source.name}", source.read_bytes())
 
     references: dict[str, object] = {
         "Moc": moc_name,
@@ -328,16 +343,16 @@ def rebuild(
     }
     if rig is not None:
         physics_name = model_name + ".physics3.json"
-        _write_json(output_dir / physics_name, _physics_json(rig), force=force)
+        write_json(physics_name, _physics_json(rig))
         references["Physics"] = physics_name
 
-    expressions, expression_ids = _write_expressions(model_dir, char_id, output_dir, force=force)
+    expressions, expression_ids = _write_expressions(model_dir, char_id, write_json)
     if expressions:
         references["Expressions"] = expressions
     sources = list(motion_bundles or [])
     if motion_directory is not None:
         sources.extend(sorted(motion_directory.glob(motion_pattern)))
-    motions = _write_motions(dict.fromkeys(sources), output_dir, force=force)
+    motions = _write_motions(dict.fromkeys(sources), write_json)
     if motions:
         references["Motions"] = motions
 
@@ -347,14 +362,14 @@ def rebuild(
         if (ids := [x for x in candidates if x in expression_ids])
     ]
     model_json = {"Version": 3, "FileReferences": references, "Groups": groups, "HitAreas": []}
-    model_json_path = output_dir / (model_name + ".model3.json")
-    _write_json(model_json_path, model_json, force=force)
+    write_json(model_name + ".model3.json", model_json)
     return {
-        "model": str(model_json_path),
+        "model": str(output_dir / (model_name + ".model3.json")),
         "textures": len(textures),
         "physics_groups": len(rig["SubRigs"]) if rig is not None else 0,
         "expressions": len(expressions),
         "motions": sum(map(len, motions.values())),
+        "files": files,
     }
 
 
@@ -365,9 +380,9 @@ def main() -> None:
     parser.add_argument("-o", "--output-dir", type=Path, required=True)
     parser.add_argument(
         "--motion-bundle", type=Path, action="append", default=[],
-        help="原始 live2d_mot_* Unity 包；可重复指定",
+        help="实验性：原始 live2d_mot_* Unity 包，转换为近似动作；可重复指定",
     )
-    parser.add_argument("--motion-dir", type=Path, help="包含原始 live2d_mot_* Unity 包的目录")
+    parser.add_argument("--motion-dir", type=Path, help="实验性：包含原始 live2d_mot_* Unity 包的目录")
     parser.add_argument(
         "--motion-pattern", default="live2d_mot_*",
         help="--motion-dir 下要转换的文件名模式；例如 live2d_mot_*_lv05*",

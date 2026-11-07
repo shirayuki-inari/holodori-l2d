@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "holodori-l2d"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Download holodori Live2D assets and rebuild Cubism preview packages"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,12 +24,14 @@ assets = [
   "Pillow>=10",
 ]
 test = ["pytest>=8,<10", "Pillow>=10"]
-search = []
 
 [project.scripts]
 holodori-l2d = "holodori_l2d.cli:main"
 holodori-l2d-rebuild = "holodori_l2d.rebuild:main"
 holodori-l2d-search = "holodori_l2d.search:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "holodori_l2d.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

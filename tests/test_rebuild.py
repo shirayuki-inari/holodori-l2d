@@ -128,3 +128,17 @@ def test_rebuild_keeps_texture_bytes_and_expressions(tmp_path):
     with pytest.raises(ValueError, match="--force"):
         (model_dir / "texture.png").write_bytes(b"changed")
         rebuild(model_dir, out)
+
+
+def test_shared_motion_is_converted_once_until_it_changes(tmp_path, monkeypatch):
+    from holodori_l2d import rebuild as module
+
+    bundle = tmp_path / "live2d_mot_idle-01_lv05"
+    bundle.write_bytes(b"synthetic bundle")
+    calls = []
+    monkeypatch.setattr(module, "_motion_json", lambda path: calls.append(path) or (path.name, {}))
+    assert module._convert_motion(bundle) == module._convert_motion(bundle)
+    assert len(calls) == 1
+    bundle.write_bytes(b"updated bundle, different size")
+    module._convert_motion(bundle)
+    assert len(calls) == 2

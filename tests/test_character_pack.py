@@ -15,7 +15,7 @@ from holodori_l2d import character_pack, cli, interactive, search, vtube
 def index():
     rows = [
         {"name": "卡牌甲", "card_id": "card-00001-5-uniq-0001-00", "character_id": "chr-00001",
-         "character": "角色甲", "model_id": "00001-uniq-0001-00", "resource_name": "live2d_mdl_00001-uniq-0001-00", "model_exists": True},
+         "character": "角色甲", "character_en": "Shirakami Fubuki", "model_id": "00001-uniq-0001-00", "resource_name": "live2d_mdl_00001-uniq-0001-00", "model_exists": True},
         {"name": "默认", "card_id": None, "character_id": "chr-00001",
          "character": "角色甲", "model_id": "00001-nrml-0001-00", "resource_name": "live2d_mdl_00001-nrml-0001-00", "model_exists": True},
         {"name": "卡牌乙", "card_id": "card-00002-5-uniq-0002-00", "character_id": "chr-00002",
@@ -43,6 +43,7 @@ def prepare(monkeypatch):
         return {"output_dir": str(folder), "asset_id": asset_id.removeprefix("live2d_mdl_")}
 
     monkeypatch.setattr(cli, "prepare", fake_prepare)
+    monkeypatch.setattr(cli, "prefetch", lambda models, **options: None)
     return calls
 
 
@@ -108,6 +109,8 @@ def test_pack_avoids_unrelated_zip_and_is_atomic(tmp_path, index, prepare, monke
 def test_resolve_character_and_keyboard_shortcut(index):
     assert character_pack.resolve_character(index, "角色甲") == "chr-00001"
     assert character_pack.resolve_character(index, "００００１") == "chr-00001"
+    assert character_pack.resolve_character(index, "shirakami") == "chr-00001"
+    assert character_pack.resolve_character(index, "Shirakami Fubuki") == "chr-00001"
     with pytest.raises(ValueError, match="多个角色"):
         character_pack.resolve_character(index, "角色")
     with pytest.raises(ValueError, match="未找到"):
@@ -120,18 +123,40 @@ def test_resolve_character_and_keyboard_shortcut(index):
 
 
 def test_default_ui_pack_expands_beyond_search_result(index, monkeypatch):
+    import prompt_toolkit
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(search, "load_index", lambda *a, **kw: index)
+    answers = iter(["n", "卡牌甲", ""])
+    asked = []
 
-    def choose(rows):
+    def ask(text):
+        asked.append(text)
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError from None
+
+    def choose(rows, **options):
         assert len(rows) == 1
         return interactive.CharacterPackRequest(rows[0]["character_id"])
 
+    packed = []
+
+    def download_character(cid, data, **options):
+        packed.append(cid)
+        return {"results": [{"status": "ok", "model": row["resource_name"]}
+                            for row in character_pack.character_models(data, cid)]}
+
+    monkeypatch.setattr(prompt_toolkit, "prompt", ask)
     monkeypatch.setattr(interactive, "select_cards", choose)
-    monkeypatch.setattr(character_pack, "download_character", lambda cid, data, **kw: data["models"])
+    monkeypatch.setattr(character_pack, "download_character", download_character)
     result = interactive.run("卡牌甲", language="chs", character=None, refresh=False, app_version="1.2.1")
-    assert result == index["models"]
+    # The first confirmation is declined; the second packs both models of the character.
+    assert "全部 2 个模型" in asked[0]
+    assert packed == ["chr-00001"]
+    assert result["total"] == 2 and result["failed"] == 0
 
 
 def test_pack_cli_reports_failed_downloads(index, monkeypatch):

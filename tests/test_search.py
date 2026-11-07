@@ -19,7 +19,7 @@ def tables():
              "asset_id": "00001-3-nrml-0099-00"},
         ],
         "Costume": [{"id": "costume-a", "asset_id": "00001-uniq-0123-00"}],
-        "Character": [{"id": "chr-00001", "name_lang_id": "chr-name-a"},
+        "Character": [{"id": "chr-00001", "name_lang_id": "chr-name-a", "name_eng": "Alpha Idol"},
                       {"id": "chr-00002", "name_lang_id": "chr-name-b"}],
         "LangCard": [{"id": "name-a", "text": "共享的卡名"}, {"id": "name-b", "text": "共享的卡名"},
                      {"id": "name-c", "text": "特別なＣａｒｄ"}, {"id": "name-d", "text": "候选卡牌"}],
@@ -73,7 +73,7 @@ def test_official_refresh_then_offline_cache_and_failed_refresh(tmp_path, monkey
         json.dumps({"schema_version": 1, "language": "chs", "cards": []}), encoding="utf-8",
     )
     index = search.load_index(tmp_path)
-    assert index["schema_version"] == 2
+    assert index["schema_version"] == search.SCHEMA_VERSION
     assert index["models"] == []
     assert index["master_version"] == "synthetic"
     assert index["catalog_revision"] == 99
@@ -109,3 +109,28 @@ def test_catalog_models_include_costumes_without_cards(tables):
     index = {"cards": cards, "models": rows}
     assert search.search_cards(index, "特别服装") == [rows[1]]
     assert search.search_cards(index, "00003") == [rows[2]]
+
+
+def test_english_character_names_are_searchable(tables):
+    index = {"cards": search.join_cards(tables, set())}
+    assert index["cards"][0]["character_en"] == "Alpha Idol"
+    assert [r["card_id"] for r in search.search_cards(index, "alpha")] == ["card-a", "card-c", "card-d"]
+    assert search.search_cards(index, "共享", "ALPHA IDOL")[0]["card_id"] == "card-a"
+    assert search.search_cards(index, "Alpha Idol")[0]["card_id"] == "card-a"  # Exact match ranks first.
+
+
+def test_old_cache_upgrades_online_and_falls_back_offline(tmp_path, monkeypatch, capsys):
+    old = {"schema_version": 2, "language": "chs", "cards": [], "models": []}
+    (tmp_path / "cards-chs.json").write_text(json.dumps(old), encoding="utf-8")
+
+    def offline(*args):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(master, "fetch_master", offline)
+    assert search.load_index(tmp_path) == old  # Still searchable without English names.
+    assert "offline" in capsys.readouterr().err
+    with pytest.raises(RuntimeError, match="offline"):
+        search.load_index(tmp_path, refresh=True)  # An explicit refresh still reports failure.
+    (tmp_path / "cards-chs.json").write_text(json.dumps({**old, "schema_version": 1}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="offline"):
+        search.load_index(tmp_path)  # Too old to use at all.

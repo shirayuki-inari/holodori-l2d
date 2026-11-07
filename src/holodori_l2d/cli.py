@@ -15,9 +15,10 @@ from pathlib import Path
 
 import httpx
 
+from . import __version__
 from .icon import card_thumbnail_name, save_icon, select_thumbnail
 from .master import APP_VERSION
-from .naming import EXPORT_INFO, export_owner, model_id_from_input, validate_name
+from .naming import EXPORT_INFO, export_owner, model_id_from_input, read_export_info, validate_name
 from .rebuild import rebuild
 from .util import cache_dir, json_bytes, output_dir, summarize, use_utf8_stdio, write_atomic, write_zip
 from .vtube import ensure_config
@@ -101,6 +102,70 @@ def _make_zip(folder: Path, *, force: bool) -> Path:
     return write_zip(destination, [folder])
 
 
+def _cache_paths(cache_root: Path | None, catalog_path: Path | None) -> tuple[Path, Path]:
+    cache_root = cache_dir(cache_root).resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    return cache_root, (catalog_path or cache_root / "octo_list.json").resolve()
+
+
+def _download(cache_root: Path, catalog: Path, names: list[str]) -> None:
+    """Fetch the bundles missing from the cache; cached ones need no upstream call."""
+    raw_bundles = cache_root / "raw" / "assetbundles"
+    missing = [name for name in names if not _nonempty(raw_bundles / name)]
+    if missing:
+        _run_upstream(
+            "download", str(cache_root / "raw"), "--catalog", str(catalog), "--no-overwrite",
+            "--filter", "^(?:" + "|".join(map(re.escape, missing)) + ")$",
+        )
+        missing = [name for name in missing if not _nonempty(raw_bundles / name)]
+    if missing:
+        raise RuntimeError("下载后仍缺少资源：" + ", ".join(missing))
+
+
+def _remove_stale(folder: Path, files: list[str]) -> list[str]:
+    """Delete files that the previous export generated but this one did not."""
+    root = folder.resolve()
+    stale = sorted(set(read_export_info(folder).get("files", [])) - set(files))
+    for relative in stale:
+        path = (folder / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            continue
+        path.unlink()
+        for parent in path.parents:
+            if parent == root or any(parent.iterdir()):
+                break
+            parent.rmdir()
+    return stale
+
+
+def prefetch(models: list[tuple[str, str | None]], *, cache_root: Path | None = None,
+             catalog_path: Path | None = None, motion_level: str | None = None, **_: object) -> None:
+    """Download several models' assets in one upstream call.
+
+    ``models`` holds (asset ID, card ID) pairs. Failures are only reported here:
+    each model's ``prepare`` retries what is still missing and records the error.
+    """
+    if len(models) < 2 or importlib.util.find_spec("holodori_asset_tools") is None:
+        return
+    try:
+        cache_root, catalog = _cache_paths(cache_root, catalog_path)
+        parsed = [(*model_id_from_input(asset_id), card_id) for asset_id, card_id in models]
+        wanted = [f"live2d_mdl_{model_id}" for model_id, _, _ in parsed]
+        names = _load_catalog(catalog, wanted, refreshable=catalog_path is None)
+        selected = []
+        for model_id, character, card_id in parsed:
+            try:
+                expressions, motions = _selected_assets(names, model_id, character, motion_level)
+            except ValueError:
+                continue
+            thumbnail = select_thumbnail(names, card_id)
+            selected += [f"live2d_mdl_{model_id}", *expressions, *motions, *([thumbnail] if thumbnail else [])]
+        print(f"批量下载/检查 {len(models)} 个模型的资源……", flush=True)
+        _download(cache_root, catalog, list(dict.fromkeys(selected)))
+    except Exception as error:  # Best effort only: prepare() retries and reports per model.
+        print(f"批量下载未全部完成，将逐个重试：{error}", flush=True)
+
+
 def prepare(
     asset_id: str,
     *,
@@ -110,11 +175,14 @@ def prepare(
     output_root: Path | None = None,
     cache_root: Path | None = None,
     catalog_path: Path | None = None,
-    motion_level: str | None = "lv05",
+    motion_level: str | None = None,
     force: bool = False,
     make_zip: bool = True,
 ) -> dict:
-    """Download, extract and rebuild one model; ``model_name`` renames its files."""
+    """Download, extract and rebuild one model; ``model_name`` renames its files.
+
+    Motions are experimental and exported only when ``motion_level`` (e.g. "lv05") is given.
+    """
     if importlib.util.find_spec("holodori_asset_tools") is None:
         raise RuntimeError('请先运行：python -m pip install ".[assets]"')
     if motion_level is not None and not re.fullmatch(r"lv\d{2}", motion_level):
@@ -127,14 +195,12 @@ def prepare(
     model_id, character = model_id_from_input(asset_id)
     bundle = f"live2d_mdl_{model_id}"
     card_id = card_info.get("card_id") if card_info is not None else asset_id
-    cache_root = cache_dir(cache_root).resolve()
-    raw_bundles = cache_root / "raw" / "assetbundles"
-    catalog = (catalog_path or cache_root / "octo_list.json").resolve()
     destination = output_dir(output_root).resolve() / (output_name or f"live2d_{model_id}")
     if (card_info is not None and destination.exists()
             and export_owner(destination) != (card_info.get("export_id") or card_info["card_id"])):
         raise ValueError(f"输出目录不属于此卡牌，请换一个目录：{destination}")
-    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root, catalog = _cache_paths(cache_root, catalog_path)
+    raw_bundles = cache_root / "raw" / "assetbundles"
 
     names = _load_catalog(catalog, [bundle, *filter(None, [card_thumbnail_name(card_id)])],
                           refreshable=catalog_path is None)
@@ -143,17 +209,9 @@ def prepare(
     if thumbnail is None:
         print("未找到唯一对应的卡牌缩略图，跳过 icon.jpg。", flush=True)
     thumbnails = [thumbnail] if thumbnail else []
-    selected = [bundle, *expressions, *motions, *thumbnails]
-
     print(f"下载/检查：1 个模型、{len(expressions)} 个表情、{len(motions)} 个候选动作、"
           f"{len(thumbnails)} 张卡牌缩略图", flush=True)
-    _run_upstream(
-        "download", str(cache_root / "raw"), "--catalog", str(catalog), "--no-overwrite",
-        "--filter", "^(?:" + "|".join(map(re.escape, selected)) + ")$",
-    )
-    missing = [name for name in selected if not _nonempty(raw_bundles / name)]
-    if missing:
-        raise RuntimeError("下载后仍缺少资源：" + ", ".join(missing))
+    _download(cache_root, catalog, [bundle, *expressions, *motions, *thumbnails])
 
     with tempfile.TemporaryDirectory(prefix="live2d-extract-", dir=cache_root) as temp:
         extracted = Path(temp)
@@ -172,8 +230,12 @@ def prepare(
             summary["icon_asset"] = thumbnail
 
     summary["vtube"] = str(ensure_config(Path(summary["model"])))
-    if card_info is not None:
-        write_atomic(destination / EXPORT_INFO, json_bytes(card_info))
+    files = summary.pop("files")
+    removed = _remove_stale(destination, files)
+    if removed:
+        summary["removed"] = removed
+        print(f"已删除上次导出遗留、本次未生成的 {len(removed)} 个文件。", flush=True)
+    write_atomic(destination / EXPORT_INFO, json_bytes({**(card_info or {}), "files": files}))
     summary["asset_id"] = model_id
     if output_name is not None:
         summary.update(card_id=card_id, output_name=output_name)
@@ -214,6 +276,7 @@ def prepare_batch(batch_file: Path, **options: object) -> dict:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     add = parser.add_argument
+    add("--version", action="version", version=f"%(prog)s {__version__}")
     add("asset_id", nargs="?", help="卡牌名或角色名搜索词；也可直接输入卡牌/模型 ID")
     add("--lang", choices=("chs", "cht"), default="chs", help="搜索语言：简中/繁中")
     add("--character", help="按角色名或编号筛选搜索结果")
@@ -224,8 +287,11 @@ def _parser() -> argparse.ArgumentParser:
     add("-o", "--output-root", type=Path, help="输出根目录（默认当前目录/output）")
     add("--cache-root", type=Path, help="下载缓存（默认当前目录/input/.holodori_assets）")
     add("--catalog", type=Path, help="指定游戏资源索引文件")
-    add("--motion-level", default="lv05", help="候选动作等级，默认 lv05")
-    add("--no-motions", action="store_true", help="仅生成模型与表情")
+    add("--experimental-motions", action="store_true",
+        help="实验性：额外导出候选动作（由游戏动画近似重建，可能与游戏内不一致）")
+    add("--motion-level", help="配合 --experimental-motions 选择候选动作等级，默认 lv05")
+    # Motions used to be on by default; keep the old opt-out flag working as a no-op.
+    add("--no-motions", dest="experimental_motions", action="store_false", help=argparse.SUPPRESS)
     add("--no-zip", action="store_true", help="不生成压缩包")
     add("--force", action="store_true", help="覆盖已有的生成文件")
     return parser
@@ -239,11 +305,13 @@ def main() -> None:
         parser.error("--batch 与单项 ID 不能同时使用")
     if args.pack_character is not None and (args.batch is not None or args.asset_id is not None or args.no_zip):
         parser.error("--pack-character 不能与搜索词、--batch 或 --no-zip 同时使用")
+    if args.motion_level is not None and not args.experimental_motions:
+        parser.error("--motion-level 需要配合 --experimental-motions 使用")
     options = dict(
         output_root=args.output_root,
         cache_root=args.cache_root,
         catalog_path=args.catalog,
-        motion_level=None if args.no_motions else args.motion_level,
+        motion_level=(args.motion_level or "lv05") if args.experimental_motions else None,
         force=args.force,
         make_zip=not args.no_zip,
     )

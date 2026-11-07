@@ -75,12 +75,23 @@ def list_names(root: Path) -> dict[str, Path]:
     return {p.name.casefold(): p for p in root.iterdir()} if root.is_dir() else {}
 
 
-def export_owner(folder: Path) -> str | None:
+def read_export_info(folder: Path) -> dict:
+    """Read an export's ownership and generated-file record; {} when absent or invalid."""
     try:
         data = json.loads((folder / EXPORT_INFO).read_text(encoding="utf-8"))
-        return data.get("export_id") or data.get("card_id")
-    except (OSError, ValueError, AttributeError):
-        return None
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def export_owner(folder: Path) -> str | None:
+    data = read_export_info(folder)
+    return data.get("export_id") or data.get("card_id")
+
+
+def exported_keys(root: Path) -> set[str]:
+    """Owners (card ID or resource name) of the exports already in ``root``."""
+    return {owner for path in list_names(root).values() if path.is_dir() and (owner := export_owner(path))}
 
 
 def export_key(row: dict) -> str:

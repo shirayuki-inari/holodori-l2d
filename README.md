@@ -22,13 +22,13 @@ Windows 用户安装后双击 `run_live2d.bat` 即可进入搜索。已有安装
 holodori-l2d
 ```
 
-也可以运行 `python -m holodori_l2d`。输入卡牌名、角色名或角色编号，支持部分名称（例如“吹雪”），留空可浏览全部卡牌。搜索会同时匹配卡牌和角色，结果显示卡名、角色和卡牌 ID：
+也可以运行 `python -m holodori_l2d`。输入卡牌名、角色名、英文角色名或角色编号，支持部分名称（例如“吹雪”或 “fubuki”），留空可浏览全部卡牌。搜索会同时匹配卡牌和角色，结果显示卡名、角色和卡牌 ID：
 
 - **↑ / ↓**：移动光标；**PageUp / PageDown**：翻页。
 - **空格**：勾选/取消，多选。
 - **A**：全选/清空可下载项。
 - **Enter**：下载勾选项；未勾选时下载光标所在项。
-- **P**：下载光标所在角色的全部模型，自动生成角色名 ZIP。
+- **P**：下载光标所在角色的全部模型，自动生成角色名 ZIP；开始前会显示模型数量并请求确认（直接回车或 `y` 确认，`n` 取消）。
 - **Esc**：返回重新搜索；**Ctrl+C**：退出。
 
 也可直接带搜索词启动列表：
@@ -41,7 +41,9 @@ holodori-l2d "寶藏" --lang cht
 holodori-l2d --refresh
 ```
 
-首次加载官方卡牌目录，之后使用缓存；`--refresh` 获取新卡牌。没有模型的卡牌标为“暂无模型”，不能勾选。多个下载逐项执行，失败会显示原因并继续其余项。
+首次加载官方卡牌目录，之后使用缓存；`--refresh` 获取新卡牌。没有模型的卡牌标为“暂无模型”，不能勾选；输出目录中已有的模型标为“已导出”，仍可再次下载。多个下载先一次性获取所需资源，再逐项导出，失败会显示原因并继续其余项。
+
+下载完成后会回到搜索框，可继续搜索下载；按 **Ctrl+C** 退出。只要本次运行中有下载失败，退出码就是 1。
 
 **搜索下载以卡牌名称命名文件夹和模型文件**，例如：
 
@@ -55,11 +57,13 @@ output/
 │  ├─ icon.jpg
 │  ├─ 独占宝物♡水力加农炮.4096/
 │  ├─ expressions/
-│  └─ motions/
+│  └─ motions/          （仅在启用 --experimental-motions 时生成）
 └─ 独占宝物♡水力加农炮.zip
 ```
 
-将整个模型文件夹复制到 VTube Studio 的 `Live2DModels/`，下载时生成的同名 `.vtube.json` 提供模型名称和文件引用。同名卡牌的文件夹追加角色名，仍冲突时追加 ID；模型文件名仍使用卡牌名。Windows 禁用符号转换为全角符号，过长名称会截短。目录中的 `.holodori-model.json` 记录卡牌归属，以便重跑时识别已导出的模型。
+将整个模型文件夹复制到 VTube Studio 的 `Live2DModels/`，下载时生成的同名 `.vtube.json` 提供模型名称和文件引用。同名卡牌的文件夹追加角色名，仍冲突时追加 ID；模型文件名仍使用卡牌名。Windows 禁用符号转换为全角符号，过长名称会截短。目录中的 `.holodori-model.json` 记录卡牌归属和本工具生成的文件清单，以便重跑时识别已导出的模型。
+
+重新导出（例如之前启用了 `--experimental-motions`，这次不启用并加 `--force`）时，上次生成而本次不再生成的文件会被删除，避免残留动作等旧文件被打进 ZIP。只删除清单中记录的文件；自己放入目录的文件、`.vtube.json` 和 `icon.jpg` 不会被删除。旧版本导出的目录没有文件清单，首次重导时不做清理。
 
 下载时会同时获取对应卡牌的 `img_card_live_thumb_*` 图片包，提取并转换为真正的 JPEG，保存为模型目录中的 **`icon.jpg`**，新生成的单模型 ZIP 和角色整包也会包含它。保持原图尺寸；透明区域以白色填充。搜索/角色打包按对应卡牌 ID 精确匹配；直接按模型 ID 下载时，仅在缩略图匹配唯一时使用。没有卡牌或找不到唯一对应缩略图时会提示跳过，不借用其他卡牌图片。已有不同内容的 `icon.jpg` 不会覆盖，需加 `--force`；更新已有单模型 ZIP 同样需要 `--force`。
 
@@ -74,14 +78,14 @@ output/
 ```powershell
 holodori-l2d --pack-character "白上吹雪"
 holodori-l2d --pack-character 00009
-holodori-l2d --pack-character "白上吹雪" --refresh --no-motions
+holodori-l2d --pack-character "白上吹雪" --refresh --experimental-motions
 ```
 
 默认生成 `output/白上吹雪.zip`，包内各模型保持独立文件夹，解压后可将这些文件夹放入 VTube Studio 的 `Live2DModels/`。卡牌模型沿用卡牌名；无卡牌模型使用官方服装名，缺少名称时使用模型 ID。根目录的 `holodori-character.json` 记录角色、模型清单及目录版本。
 
-整包模式只生成一个角色 ZIP，模型文件夹仍保存在输出目录中。相同资源不会重复下载；所有模型导出成功后才生成或更新整包。任一模型失败时显示失败项，本次不生成新整包，已有整包会保留。再次执行会更新本工具生成的同角色 ZIP；如果同名 ZIP 属于其他内容，会自动追加角色编号避让。
+整包模式只生成一个角色 ZIP，模型文件夹仍保存在输出目录中。所有模型的资源通过一次下载获取，相同资源不会重复下载，共用的动作也只转换一次；所有模型导出成功后才生成或更新整包。任一模型失败时显示失败项，本次不生成新整包，已有整包会保留。再次执行会更新本工具生成的同角色 ZIP；如果同名 ZIP 属于其他内容，会自动追加角色编号避让。
 
-`--pack-character` 支持完整/部分角色名及编号；匹配多个角色时会列出候选编号。可用 `--lang cht`、`--output-root`、`--motion-level`、`--no-motions` 等选项。`--no-zip` 用于普通下载，不能与 `--pack-character` 同时使用；在列表中按 P 始终执行角色 ZIP 打包。
+`--pack-character` 支持完整/部分角色名（含英文名）及编号；匹配多个角色时会列出候选编号。可用 `--lang cht`、`--output-root`、`--experimental-motions` 等选项。`--no-zip` 用于普通下载，不能与 `--pack-character` 同时使用；在列表中按 P 始终执行角色 ZIP 打包。
 
 ## 按 ID 下载并导出
 
@@ -100,21 +104,21 @@ output/
 │  │  └─ t_live2d_04016-uniq-0079-00_texture_00.png
 │  ├─ 04016_004.physics3.json
 │  ├─ expressions/
-│  └─ motions/
+│  └─ motions/          （仅在启用 --experimental-motions 时生成）
 └─ live2d_04016-uniq-0079-00.zip
 ```
 
 请保持整个模型目录结构不变，在支持 Cubism 5 的播放器中打开 `.model3.json`，不要只打开 `.moc3`。表情预览可使用 **Cubism Viewer (for OW)**；独立的 Viewer for Unity 没有相同的表情列表。
 
-默认下载角色表情和索引中共用的 `lv05` 候选动作。动作并非逐个针对该角色确认过的专属清单。常用选项：
+默认只生成模型、物理和表情。动作导出是**实验性**功能，需要加 `--experimental-motions` 才会启用：它下载索引中共用的候选动作（默认 `lv05`，可用 `--motion-level` 更换），并从游戏动画近似重建为 `.motion3.json`（详见“还原范围与局限”）。这些动作并非逐个针对该角色确认过的专属清单。常用选项：
 
 ```powershell
-holodori-l2d 04016-5-uniq-0079-00 --no-motions
-holodori-l2d 04016-5-uniq-0079-00 --motion-level lv04
+holodori-l2d 04016-5-uniq-0079-00 --experimental-motions
+holodori-l2d 04016-5-uniq-0079-00 --experimental-motions --motion-level lv04
 holodori-l2d 04016-5-uniq-0079-00 --output-root D:\exports --no-zip
 ```
 
-下载缓存默认位于当前目录的 `input/.holodori_assets/`；可用 `--cache-root` 和 `--catalog` 指定其他位置。已有不同内容的输出不会覆盖；需要重建时使用 `--force` 或换一个输出目录。普通单模型 ZIP 不会在未加 `--force` 时被覆盖；角色整包采用上节所述的更新规则。
+下载缓存默认位于当前目录的 `input/.holodori_assets/`；可用 `--cache-root` 和 `--catalog` 指定其他位置。缓存中已有的资源包直接使用，不再调用下载器。已有不同内容的输出不会覆盖；需要重建时使用 `--force` 或换一个输出目录。普通单模型 ZIP 不会在未加 `--force` 时被覆盖；角色整包采用上节所述的更新规则。
 
 ## 批量下载并导出
 
@@ -131,7 +135,7 @@ live2d_mdl_00024-nrml-0020-00 live2d_00024-nrml-0020-00
 
 ```powershell
 holodori-l2d --batch batch.txt
-holodori-l2d --batch batch.txt --no-motions --output-root D:\exports
+holodori-l2d --batch batch.txt --experimental-motions --output-root D:\exports
 ```
 
 上述第一行会输出到 `output/fubuki-狐のお宮でこんこんこん/`，并生成 `output/fubuki-狐のお宮でこんこんこん.zip`。每行独立处理，某行出错不会跳过后面的记录；结束时输出成功/失败数和逐行结果。只要有失败，命令退出码就是 1。`--force`、`--no-zip`、缓存和动作选项对所有行生效。单项命令仍沿用默认的 `live2d_<模型ID>` 输出名。
@@ -146,7 +150,7 @@ holodori-l2d-search "We are hololive!" --character 00023
 holodori-l2d-search "宝物" --refresh
 ```
 
-也可以使用 `python -m holodori_l2d.search`。支持卡牌名、角色名、角色编号、部分名称及 `--lang cht` 繁体中文；搜索使用游戏原文，简繁不会自动互转。同名卡牌全部返回，可用 `--character` 按角色名或编号进一步筛选。
+也可以使用 `python -m holodori_l2d.search`。支持卡牌名、角色名、英文角色名、角色编号、部分名称及 `--lang cht` 繁体中文；搜索使用游戏原文，简繁不会自动互转。同名卡牌全部返回，可用 `--character` 按角色名或编号进一步筛选。
 
 例如搜索“宝物”会返回“独占宝物♡水力加农炮”、`card-00023-5-uniq-0085-00` 和 `live2d_mdl_00023-uniq-0085-00`。输出包含 `model_exists`；只有它为 `true` 才表示该资源在此次查询的索引中存在。查询成功后可将 `resource_name` 交给下载命令：
 
@@ -156,7 +160,7 @@ holodori-l2d live2d_mdl_00023-uniq-0085-00
 
 映射优先使用 `Card.reward_costume_id → Costume.asset_id`；没有服装奖励的卡牌按 `Card.asset_id` 去掉稀有度段得到候选模型，并核对目录，结果中用 `mapping_source` 标明来源。无卡牌模型也可按角色或服装名搜索，结果标为“服装模型”，JSON 中 `card_id` 为 `null`、`mapping_source` 为 `catalog_costume`。
 
-首次查询下载卡牌、角色、服装及各自名称共六张表和模型索引；缓存位于 `input/.holodori_assets/master/`。旧版仅卡牌缓存会在首次使用时联网升级。之后默认使用缓存，可离线搜索。`--refresh` 更新，`--cache-root` 更改缓存目录；输出的主数据版本、资源索引版本和抓取时间用于判断新旧。“全部模型”以该缓存版本为准，新内容需刷新。刷新失败会保留原有查询索引并报错。
+首次查询下载卡牌、角色、服装及各自名称共六张表和模型索引；缓存位于 `input/.holodori_assets/master/`。缓存格式过旧或文件损坏时会自动联网重建；旧版缓存在离线等原因导致重建失败时仍可继续使用，但暂时不能按英文角色名搜索。之后默认使用缓存，可离线搜索。`--refresh` 更新，`--cache-root` 更改缓存目录；输出的主数据版本、资源索引版本和抓取时间用于判断新旧。“全部模型”以该缓存版本为准，新内容需刷新。刷新失败会保留原有查询索引并报错。
 
 官方接口需要客户端版本号，当前默认 `1.2.1`，版本检查失败时可用 `--app-version <游戏当前版本>` 指定。已验证的主数据格式为 SQLCipher 4（4096 字节页、raw key、逐页 HMAC-SHA512 校验），表记录为 protobuf；不需要安装 SQLCipher。上游改动协议、密钥或压缩格式时可能需要更新读取器。
 
@@ -175,7 +179,7 @@ holodori-l2d-rebuild "D:\extracted\live2d_mdl_04016-uniq-0079-00" -o "D:\exports
 - MOC3 字节与 PNG 纹理直接复制，不重编码；纹理放入与 MOC 同名前缀的 `.4096/` 目录。
 - 表情的参数 ID、数值、混合方式、淡变时间由游戏包转换为 `.exp3.json`；`04016` 示例已逐项比对。
 - 物理配置从 Unity 序列化数据重建。少数原始组名可能因提取时字符解码而使用占位名，数值不因此改变。
-- `.motion3.json` 是由 Unity `AnimationClip` 的参数曲线反向重建，数值被舍入到 5 位小数，过渡时间统一设为 0.5 秒。它可用于预览，**不保证与游戏内播放完全一致，也不是原始 motion3 文件的无损副本**。
+- `.motion3.json`（实验性，仅 `--experimental-motions` 或底层 `--motion-bundle` / `--motion-dir` 生成）是由 Unity `AnimationClip` 的参数曲线反向重建，数值被舍入到 5 位小数，过渡时间统一设为 0.5 秒。它可用于预览，**不保证与游戏内播放完全一致，也不是原始 motion3 文件的无损副本**。
 - 下载导出时仅生成 VTube Studio 的最小 `.vtube.json` 元数据，不包含面部追踪参数映射或热键设置，导入后需要自行配置。底层 `holodori-l2d-rebuild` 不生成该配置。文件结构和引用已验证；不代表已在所有播放器或操作系统中完成实机验证。
 
 ## 公开范围与许可

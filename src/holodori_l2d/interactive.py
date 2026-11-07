@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 
 from . import search
-from .naming import export_key, export_names
+from .naming import export_key, export_names, exported_keys
 from .search import character_label, downloadable
 from .util import cache_dir, output_dir, summarize
 
@@ -20,7 +20,9 @@ class CharacterPackRequest:
     character_id: str
 
 
-def select_cards(rows: list[dict], *, input=None, output=None) -> list[dict] | CharacterPackRequest | None:
+def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
+                 input=None, output=None) -> list[dict] | CharacterPackRequest | None:
+    """Return the chosen rows, a character-pack request, or None to search again."""
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, Window
@@ -84,7 +86,11 @@ def select_cards(rows: list[dict], *, input=None, output=None) -> list[dict] | C
             mark = "[x]" if i in selected else "[ ]" if enabled else "[-]"
             identity = row.get("card_id") or f"服装模型 {row['resource_name']}"
             text = " ".join(f"{'>' if focused else ' '} {mark} {row['name']}  · {character_label(row)}  · {identity}".split())
-            fragments.append((style, text + ("" if enabled else "  （暂无模型）")))
+            if not enabled:
+                text += "  （暂无模型）"
+            elif export_key(row) in exported:
+                text += "  （已导出）"
+            fragments.append((style, text))
             fragments.append(("", "\n" if i < len(rows) - 1 else ""))
         return fragments
 
@@ -102,8 +108,9 @@ def select_cards(rows: list[dict], *, input=None, output=None) -> list[dict] | C
 
 
 def download_cards(rows: list[dict], index: dict, **options) -> dict:
-    from .cli import prepare
+    from .cli import prefetch, prepare
 
+    prefetch([(row["resource_name"], row["card_id"]) for row in rows if downloadable(row)], **options)
     names = export_names(rows, search.browse_rows(index), output_dir(options.get("output_root")))
     results = []
     for number, (row, (folder, title)) in enumerate(zip(rows, names), 1):
@@ -127,8 +134,23 @@ def download_cards(rows: list[dict], index: dict, **options) -> dict:
     return summary
 
 
+def _pack_character(character_id: str, index: dict, prompt, **options) -> dict | None:
+    from .character_pack import character_models, download_character
+
+    models = character_models(index, character_id)
+    if not models:
+        print("资源目录中没有此角色的模型。")
+        return None
+    answer = prompt(f"将下载「{character_label(models[0])}」的全部 {len(models)} 个模型并生成角色 ZIP，"
+                    "确认？(Y/n)：")
+    if answer.strip().lower() not in ("", "y", "yes"):
+        return None
+    return download_character(character_id, index, **options)
+
+
 def run(query: str | None, *, language: str, character: str | None,
         refresh: bool, app_version: str, **options) -> dict | None:
+    """Search and download repeatedly until Ctrl+C; summarize every download."""
     from prompt_toolkit import prompt
 
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -141,19 +163,35 @@ def run(query: str | None, *, language: str, character: str | None,
         raise
     except Exception as error:
         raise RuntimeError(f"加载卡牌目录失败：{error}") from error
+    root = output_dir(options.get("output_root"))
+    results = []
     while True:
-        if query is None:
-            query = prompt("搜索卡牌名或角色名（留空浏览全部，Ctrl+C 退出）：").strip()
-        rows = search.search_cards(index, query, character) if query else search.browse_rows(index, character)
-        if not rows:
-            print("没有匹配的卡牌，请换个关键词。")
-        elif not any(map(downloadable, rows)):
-            print("匹配的卡牌暂时没有可下载模型，请换个关键词。")
-        else:
-            chosen = select_cards(rows)
-            if isinstance(chosen, CharacterPackRequest):
-                from .character_pack import download_character
-                return download_character(chosen.character_id, index, **options)
-            if chosen:
-                return download_cards(chosen, index, **options)
-        query = None
+        try:
+            text = prompt("搜索卡牌名或角色名（留空浏览全部，Ctrl+C 退出）：") if query is None else query
+            query = None
+            rows = (search.search_cards(index, text, character) if search.normalize(text)
+                    else search.browse_rows(index, character))
+            if not rows:
+                print("没有匹配的卡牌，请换个关键词。")
+                continue
+            if not any(map(downloadable, rows)):
+                print("匹配的卡牌暂时没有可下载模型，请换个关键词。")
+                continue
+            chosen = select_cards(rows, exported=exported_keys(root))
+            if not chosen:
+                continue
+            try:
+                if isinstance(chosen, CharacterPackRequest):
+                    result = _pack_character(chosen.character_id, index, prompt, **options)
+                else:
+                    result = download_cards(chosen, index, **options)
+            except (ValueError, RuntimeError, OSError) as error:
+                print(f"下载失败：{error}")
+                result = {"results": [{"status": "error", "error": str(error)}]}
+        except (KeyboardInterrupt, EOFError):
+            print("\n已退出。")
+            break
+        if result:
+            results += result["results"]
+            print("可继续搜索下载；Ctrl+C 退出。")
+    return summarize(results) if results else None

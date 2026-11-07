@@ -1,9 +1,12 @@
+import io
 import json
 import sys
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.vt100 import Vt100_Output
 
 from holodori_l2d import cli, interactive, naming
 
@@ -85,8 +88,11 @@ def test_selected_downloads_continue_after_failure(tmp_path, monkeypatch):
             raise RuntimeError("synthetic failure")
         return {"output_dir": str(tmp_path / options["output_name"])}
 
+    prefetched = []
     monkeypatch.setattr(cli, "prepare", prepare)
+    monkeypatch.setattr(cli, "prefetch", lambda models, **options: prefetched.extend(models))
     result = interactive.download_cards(rows, {"cards": rows}, output_root=tmp_path, motion_level=None)
+    assert prefetched == [(row["resource_name"], row["card_id"]) for row in rows]
     assert result["succeeded"] == result["failed"] == 1
     assert calls[1][0] == rows[1]["resource_name"]
     assert calls[1][1]["model_name"] == "第二张卡"
@@ -105,17 +111,107 @@ def test_default_entry_routes_to_interactive_search(query, monkeypatch):
     assert calls[0][1]["language"] == "chs"
 
 
-def test_search_retry_and_escape(monkeypatch):
+def test_search_retry_escape_and_continue(tmp_path, monkeypatch):
     import prompt_toolkit
 
     row = card(1, "第一张卡")
-    queries = iter(["无匹配", "第一张", "第一张"])
-    choices = iter([None, [row]])
+    exported = tmp_path / "第一张卡"
+    exported.mkdir()
+    (exported / naming.EXPORT_INFO).write_text(json.dumps({"card_id": row["card_id"]}))
+    queries = iter(["无匹配", "第一张", "第一张", "第一张"])
+    choices = iter([None, [row], [row]])
+    seen = []
+
+    def ask(text):
+        try:
+            return next(queries)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    def choose(rows, exported=frozenset()):
+        seen.append(exported)
+        return next(choices)
+
+    def download(rows, *args, **options):
+        return {"results": [{"status": "ok" if len(seen) == 2 else "error"} for _ in rows]}
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(prompt_toolkit, "prompt", lambda text: next(queries))
+    monkeypatch.setattr(prompt_toolkit, "prompt", ask)
     monkeypatch.setattr(interactive.search, "load_index", lambda *a, **kw: {"cards": [row]})
-    monkeypatch.setattr(interactive, "select_cards", lambda rows: next(choices))
-    monkeypatch.setattr(interactive, "download_cards", lambda rows, *a, **kw: {"selected": rows})
-    result = interactive.run(None, language="chs", character=None, refresh=False, app_version="1.2.1")
-    assert result == {"selected": [row]}
+    monkeypatch.setattr(interactive, "select_cards", choose)
+    monkeypatch.setattr(interactive, "download_cards", download)
+    result = interactive.run(None, language="chs", character=None, refresh=False,
+                             app_version="1.2.1", output_root=tmp_path)
+    # After each download the search prompt returns; Ctrl+C ends with a combined summary.
+    assert result["total"] == 2 and result["succeeded"] == 1 and result["failed"] == 1
+    assert seen == [{row["card_id"]}] * 3
+
+
+def test_exported_marker_in_selection_list(tmp_path):
+    rows = [card(1, "第一张卡"), card(2, "第二张卡")]
+    folder = tmp_path / "第一张卡"
+    folder.mkdir()
+    (folder / naming.EXPORT_INFO).write_text(json.dumps({"card_id": rows[0]["card_id"]}))
+    (tmp_path / "unrelated").mkdir()
+    assert naming.exported_keys(tmp_path) == {rows[0]["card_id"]}
+    screen = io.StringIO()
+    output = Vt100_Output(screen, lambda: Size(rows=24, columns=120))
+    with create_pipe_input() as pipe:
+        pipe.send_text("\r")
+        assert interactive.select_cards(rows, exported=naming.exported_keys(tmp_path),
+                                        input=pipe, output=output) == [rows[0]]
+    shown = screen.getvalue()
+    assert f"{rows[0]['card_id']}  （已导出）" in shown
+    assert f"{rows[1]['card_id']}  （" not in shown
+
+
+def test_blank_query_browses_and_pack_errors_keep_session(tmp_path, monkeypatch):
+    import prompt_toolkit
+
+    from holodori_l2d import character_pack
+
+    rows = [card(1, "第一张卡"), card(2, "第二张卡")]
+    index = {"cards": rows, "models": rows}
+    shown = []
+
+    def choose(found, **options):
+        shown.append(found)
+        if len(shown) > 1:
+            raise KeyboardInterrupt
+        return interactive.CharacterPackRequest(found[0]["character_id"])
+
+    def broken_pack(*args, **options):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(prompt_toolkit, "prompt", lambda text: "  ")  # Confirm, then browse.
+    monkeypatch.setattr(interactive.search, "load_index", lambda *a, **kw: index)
+    monkeypatch.setattr(interactive, "select_cards", choose)
+    monkeypatch.setattr(character_pack, "download_character", broken_pack)
+    result = interactive.run("  ", language="chs", character=None, refresh=False,
+                             app_version="1.2.1", output_root=tmp_path)
+    assert shown == [rows, rows]  # A blank query browses everything instead of erroring.
+    assert result["failed"] == 1 and result["results"][0]["error"] == "disk full"
+
+
+@pytest.mark.parametrize("flags,level", [
+    ([], None),
+    (["--no-motions"], None),  # Former opt-out flag is still accepted.
+    (["--experimental-motions"], "lv05"),
+    (["--experimental-motions", "--motion-level", "lv04"], "lv04"),
+])
+def test_motions_are_experimental_and_off_by_default(flags, level, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["holodori-l2d", *flags])
+    monkeypatch.setattr(interactive, "run", lambda value, **options: calls.append(options))
+    cli.main()
+    assert calls[0]["motion_level"] == level
+
+
+def test_motion_level_requires_experimental_flag(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["holodori-l2d", "--motion-level", "lv04"])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2 and "--experimental-motions" in capsys.readouterr().err
