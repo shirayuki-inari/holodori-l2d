@@ -8,15 +8,15 @@
 
 ## 安装
 
-需要 Python 3.10+、Git 和网络连接：
+需要 Python 3.10+ 和网络连接，**不需要 Git**。打开 [Releases 页面](https://github.com/shirayuki-inari/holodori-l2d/releases/latest)，复制其中的安装命令运行即可。以 1.0.0 为例：
 
 ```powershell
-git clone https://github.com/shirayuki-inari/holodori-l2d.git
-cd holodori-l2d
-python -m pip install -e ".[assets]"
+python -m pip install "holodori-l2d[assets] @ https://github.com/shirayuki-inari/holodori-l2d/releases/download/v1.0.0/holodori_l2d-1.0.0-py3-none-any.whl"
 ```
 
-更新时在项目目录执行 `git pull`，再运行一次上面的 `pip install` 命令。
+Windows 用户可以同时从 Releases 页面下载 `run_live2d.bat`，放到想保存模型的文件夹里。更新时运行新版本 Release 中的安装命令即可。
+
+开发者也可以从源码安装：`git clone` 本仓库后，在项目目录运行 `python -m pip install -e ".[assets]"`。
 
 ## 快速开始
 

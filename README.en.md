@@ -8,15 +8,15 @@ An unofficial Live2D model exporter for `hololive Dreams`. Search for a card or 
 
 ## Installation
 
-Requires Python 3.10+, Git and an internet connection:
+Requires Python 3.10+ and an internet connection; **Git is not needed**. Open the [Releases page](https://github.com/shirayuki-inari/holodori-l2d/releases/latest) and run the install command shown there. For 1.0.0:
 
 ```powershell
-git clone https://github.com/shirayuki-inari/holodori-l2d.git
-cd holodori-l2d
-python -m pip install -e ".[assets]"
+python -m pip install "holodori-l2d[assets] @ https://github.com/shirayuki-inari/holodori-l2d/releases/download/v1.0.0/holodori_l2d-1.0.0-py3-none-any.whl"
 ```
 
-To update, run `git pull` in the project folder and repeat the `pip install` command.
+On Windows, also download `run_live2d.bat` from the Releases page and put it in the folder where models should be saved. To update, run the install command from the newer release.
+
+Developers can install from source instead: clone this repository and run `python -m pip install -e ".[assets]"` in it.
 
 ## Quick start
 

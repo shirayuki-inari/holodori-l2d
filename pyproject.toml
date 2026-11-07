@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holodori-l2d"
 dynamic = ["version"]
-description = "Download holodori Live2D assets and rebuild Cubism preview packages"
+description = "Unofficial hololive Dreams Live2D exporter: search cards and build Cubism / VTube Studio models"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -22,7 +22,7 @@ classifiers = [
 
 [project.optional-dependencies]
 assets = [
-  "holodori-asset-tools @ git+https://github.com/HolodoriDB/holodori-asset-tools.git@13f150fe9dfbd367be53e5ea1c0a4ceb258b74f2",
+  "holodori-asset-tools @ https://github.com/HolodoriDB/holodori-asset-tools/archive/13f150fe9dfbd367be53e5ea1c0a4ceb258b74f2.zip",
   "Pillow>=10",
 ]
 test = ["pytest>=8,<10", "Pillow>=10"]
