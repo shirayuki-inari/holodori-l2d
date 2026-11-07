@@ -6,20 +6,16 @@ import re
 from io import BytesIO
 from pathlib import Path
 
-from .master import write_atomic
+from .naming import CARD_ID, MODEL_ID
+from .util import write_checked
 
 
 THUMB_PREFIX = "img_card_live_thumb_"
-CARD_ASSET = re.compile(r"\d{5}-\d+-[a-z0-9]+-\d{4}-\d{2}")
-MODEL_ASSET = re.compile(r"(\d{5})-([a-z0-9]+-\d{4}-\d{2})")
 
 
 def card_thumbnail_name(value: str | None) -> str | None:
-    if value is not None:
-        card_id = value.removeprefix("card-")
-        if CARD_ASSET.fullmatch(card_id):
-            return THUMB_PREFIX + card_id
-    return None
+    card_id = (value or "").removeprefix("card-")
+    return THUMB_PREFIX + card_id if CARD_ID.fullmatch(card_id) else None
 
 
 def select_thumbnail(names: set[str], value: str | None) -> str | None:
@@ -27,11 +23,11 @@ def select_thumbnail(names: set[str], value: str | None) -> str | None:
     exact = card_thumbnail_name(value)
     if exact is not None:
         return exact if exact in names else None
-    model = MODEL_ASSET.fullmatch((value or "").removeprefix("live2d_mdl_"))
+    model = MODEL_ID.fullmatch((value or "").removeprefix("live2d_mdl_"))
     if model is None:
         return None
     pattern = re.compile(rf"{THUMB_PREFIX}{model[1]}-\d+-{re.escape(model[2])}")
-    matches = sorted(name for name in names if pattern.fullmatch(name))
+    matches = [name for name in names if pattern.fullmatch(name)]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -46,14 +42,9 @@ def save_icon(thumbnail_dir: Path, output_dir: Path, *, force: bool = False) -> 
         source = images[0]
     with Image.open(source) as image:
         rgba = image.convert("RGBA")
-        # JPEG has no transparency: composite onto white rather than discard alpha.
-        rgb = Image.new("RGB", rgba.size, "white")
-        rgb.paste(rgba, mask=rgba.getchannel("A"))
-        buffer = BytesIO()
-        rgb.save(buffer, format="JPEG", quality=95, subsampling=0)
-    destination = output_dir / "icon.jpg"
-    data = buffer.getvalue()
-    if destination.exists() and destination.read_bytes() != data and not force:
-        raise ValueError(f"输出文件已存在且内容不同（可使用 --force）：{destination}")
-    write_atomic(destination, data)
-    return destination
+    # JPEG has no transparency: composite onto white rather than discard alpha.
+    rgb = Image.new("RGB", rgba.size, "white")
+    rgb.paste(rgba, mask=rgba.getchannel("A"))
+    buffer = BytesIO()
+    rgb.save(buffer, format="JPEG", quality=95, subsampling=0)
+    return write_checked(output_dir / "icon.jpg", buffer.getvalue(), force=force)

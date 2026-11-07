@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from .master import write_atomic
 from .naming import validate_name
+from .util import json_bytes, write_atomic
 
 
 def ensure_config(model_file: Path) -> Path:
@@ -31,5 +30,5 @@ def ensure_config(model_file: Path) -> Path:
             "IdleAnimationWhenTrackingLost": "",
         },
     }
-    write_atomic(destination, (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    write_atomic(destination, json_bytes(config))
     return destination

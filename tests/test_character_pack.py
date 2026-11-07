@@ -102,7 +102,7 @@ def test_pack_avoids_unrelated_zip_and_is_atomic(tmp_path, index, prepare, monke
     with pytest.raises(OSError, match="disk full"):
         character_pack.download_character("chr-00001", index, output_root=tmp_path)
     assert Path(result["zip"]).read_bytes() == original
-    assert not list(tmp_path.glob("character-*.zip"))
+    assert not list(tmp_path.glob(".holodori-*"))
 
 
 def test_resolve_character_and_keyboard_shortcut(index):

@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote
 
+from .util import write_atomic
+
 
 HOST = "us.game-hololive-dreams.com"
 APP_VERSION = "1.2.1"
@@ -26,6 +28,7 @@ APP_VERSION = "1.2.1"
 NETWORK_KEYWORD = b"BJYZ0w3DJm"
 OCTO_KEY = "B46OtKlGGHoz6sxbOWDe3VUvBsagXxr5av38IQIKUKo="
 OCTO_CLIENT_KEY = "CwFhQ+S5m4nERWVaq5oFZIP0cZLc0j7O/zllG0UYVNo="
+FIXED_SIZES = {1: 8, 5: 4}  # protobuf wire types: fixed64 / fixed32
 
 
 def _varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -56,8 +59,8 @@ def fields(data: bytes):
         else:
             if wire == 2:
                 size, offset = _varint(data, offset)
-            elif wire in (1, 5):
-                size = 8 if wire == 1 else 4
+            elif wire in FIXED_SIZES:
+                size = FIXED_SIZES[wire]
             else:
                 raise ValueError(f"不支持的 protobuf wire type：{wire}")
             if size > len(data) - offset:
@@ -205,17 +208,6 @@ def decrypt_pack(data: bytes, key_hex: str) -> bytes:
     if plain[16:21] != b"\x10\x00\x01\x01\x50":
         raise ValueError("不支持的主数据 SQLite 页格式")
     return bytes(plain)
-
-
-def write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
-        temporary = Path(file.name)
-    try:
-        temporary.write_bytes(data)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def read_table(client, pack: dict, schema: dict[int, str], cache_root: Path) -> list[dict]:

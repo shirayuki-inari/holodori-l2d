@@ -111,7 +111,7 @@ def test_prepare_offline_with_synthetic_assets(
 
     calls = []
 
-    def fake_upstream(*args, quiet=False):
+    def fake_upstream(*args):
         calls.append(args[0])
         import re
         pattern = args[args.index("--filter") + 1]

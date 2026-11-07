@@ -16,27 +16,25 @@ import zlib
 from pathlib import Path
 
 from .naming import validate_name
+from .util import json_bytes, use_utf8_stdio, write_checked
 
 
 BLENDS = {0: "Overwrite", 1: "Add", 2: "Multiply"}
 COMPONENTS = {0: "X", 1: "Y", 2: "Angle"}
-
-
-def _write(path: Path, data: bytes, *, force: bool) -> None:
-    if path.exists() and not force and path.read_bytes() != data:
-        raise ValueError(f"输出文件已存在且内容不同（可使用 --force）：{path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists() or path.read_bytes() != data:
-        path.write_bytes(data)
+GROUPS = {"EyeBlink": ("ParamEyeLOpen", "ParamEyeROpen"), "LipSync": ("ParamMouthOpenY",)}
 
 
 def _write_json(path: Path, value: object, *, force: bool) -> None:
-    data = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    _write(path, data, force=force)
+    write_checked(path, json_bytes(value), force=force)
 
 
 def _vector(value: dict[str, float]) -> dict[str, float]:
     return {"X": value["x"], "Y": value["y"]}
+
+
+def _output_scale(item: dict) -> float:
+    component = COMPONENTS[item["SourceComponent"]]
+    return item["AngleScale"] if component == "Angle" else item["TranslationScale"][component.lower()]
 
 
 def _physics_json(rig: dict) -> dict:
@@ -58,27 +56,17 @@ def _physics_json(rig: dict) -> dict:
             }
             for item in subrig["Input"]
         ]
-        outputs = []
-        for item in subrig["Output"]:
-            component = COMPONENTS[item["SourceComponent"]]
-            scale = (
-                item["AngleScale"]
-                if component == "Angle"
-                else item["TranslationScale"][component.lower()]
-            )
-            outputs.append(
-                {
-                    "Destination": {
-                        "Target": "Parameter",
-                        "Id": item["DestinationId"],
-                    },
-                    "VertexIndex": item["ParticleIndex"],
-                    "Scale": scale,
-                    "Weight": item["Weight"],
-                    "Type": component,
-                    "Reflect": bool(item["IsInverted"]),
-                }
-            )
+        outputs = [
+            {
+                "Destination": {"Target": "Parameter", "Id": item["DestinationId"]},
+                "VertexIndex": item["ParticleIndex"],
+                "Scale": _output_scale(item),
+                "Weight": item["Weight"],
+                "Type": COMPONENTS[item["SourceComponent"]],
+                "Reflect": bool(item["IsInverted"]),
+            }
+            for item in subrig["Output"]
+        ]
         vertices = [
             {
                 "Position": _vector(item["InitialPosition"]),
@@ -256,6 +244,43 @@ def _motion_json(bundle_path: Path) -> tuple[str, dict]:
     return clip["m_Name"], motion
 
 
+def _write_expressions(model_dir: Path, char_id: str, output_dir: Path, *,
+                       force: bool) -> tuple[list[dict], set[str]]:
+    """Convert this character's extracted expressions; return references and parameter IDs."""
+    expressions, parameter_ids = [], set()
+    for folder in sorted(model_dir.parent.glob(f"live2d_exp_*_{char_id}_000")):
+        source = folder / f"{folder.name}.json"
+        if not source.is_file():
+            continue
+        data = json.loads(source.read_text(encoding="utf-8"))
+        if data.get("Type") != "Live2D Expression":
+            continue
+        label = folder.name.removeprefix("live2d_exp_").removesuffix(f"_{char_id}_000")
+        params = [{"Id": x["Id"], "Value": x["Value"], "Blend": BLENDS[x["Blend"]]} for x in data["Parameters"]]
+        parameter_ids.update(x["Id"] for x in params)
+        file = f"expressions/{label}.exp3.json"
+        _write_json(output_dir / file, {
+            "Type": "Live2D Expression", "FadeInTime": data["FadeInTime"],
+            "FadeOutTime": data["FadeOutTime"], "Parameters": params,
+        }, force=force)
+        expressions.append({"Name": label, "File": file})
+    return expressions, parameter_ids
+
+
+def _write_motions(bundles, output_dir: Path, *, force: bool) -> dict[str, list[dict]]:
+    """Convert motion bundles, grouped as Idle or by their motion-name prefix."""
+    motions: dict[str, list[dict]] = {}
+    for bundle in bundles:
+        name, motion = _motion_json(bundle)
+        if not re.fullmatch(r"[\w.-]+", name):
+            raise ValueError(f"不安全的动作文件名：{name!r}")
+        file = f"motions/{name}.motion3.json"
+        _write_json(output_dir / file, motion, force=force)
+        group = "Idle" if "_idle-" in name else name.removeprefix("live2d_mot_").split("-", 1)[0].capitalize()
+        motions.setdefault(group, []).append({"File": file, "FadeInTime": 0.5, "FadeOutTime": 0.5})
+    return motions
+
+
 def rebuild(
     model_dir: Path,
     output_dir: Path,
@@ -277,7 +302,7 @@ def rebuild(
     rig = None
     for path in model_dir.glob("*.json"):
         data = json.loads(path.read_text(encoding="utf-8"))
-        if "_bytes" in data and data["_bytes"][:4] == [77, 79, 67, 51]:
+        if "_bytes" in data and data["_bytes"][:4] == list(b"MOC3"):
             if model_source is not None:
                 raise ValueError("模型包内发现多个 MOC3，无法自动选择")
             model_source = data
@@ -285,18 +310,17 @@ def rebuild(
             rig = data["_rig"]
     if model_source is None:
         raise ValueError("模型包内未找到 MOC3 数据")
-    model_name = model_name if model_name is not None else model_source["m_Name"]
+    model_name = model_source["m_Name"] if model_name is None else model_name
     validate_name(model_name)
     moc_name = model_name + ".moc3"
-    _write(output_dir / moc_name, bytes(model_source["_bytes"]), force=force)
+    write_checked(output_dir / moc_name, bytes(model_source["_bytes"]), force=force)
 
     textures = sorted(model_dir.glob("*.png"))
     if not textures:
         raise ValueError("模型包内未找到纹理 PNG")
     texture_folder = model_name + ".4096"
     for source in textures:
-        destination = output_dir / texture_folder / source.name
-        _write(destination, source.read_bytes(), force=force)
+        write_checked(output_dir / texture_folder / source.name, source.read_bytes(), force=force)
 
     references: dict[str, object] = {
         "Moc": moc_name,
@@ -307,68 +331,22 @@ def rebuild(
         _write_json(output_dir / physics_name, _physics_json(rig), force=force)
         references["Physics"] = physics_name
 
-    expressions = []
-    expression_ids = set()
-    for folder in sorted(model_dir.parent.glob(f"live2d_exp_*_{char_id}_000")):
-        source = folder / f"{folder.name}.json"
-        if not source.is_file():
-            continue
-        data = json.loads(source.read_text(encoding="utf-8"))
-        if data.get("Type") != "Live2D Expression":
-            continue
-        label = folder.name[len("live2d_exp_") : -len(f"_{char_id}_000")]
-        target_name = label + ".exp3.json"
-        params = [
-            {"Id": x["Id"], "Value": x["Value"], "Blend": BLENDS[x["Blend"]]}
-            for x in data["Parameters"]
-        ]
-        expression_ids.update(x["Id"] for x in params)
-        converted = {
-            "Type": "Live2D Expression",
-            "FadeInTime": data["FadeInTime"],
-            "FadeOutTime": data["FadeOutTime"],
-            "Parameters": params,
-        }
-        _write_json(output_dir / "expressions" / target_name, converted, force=force)
-        expressions.append({"Name": label, "File": "expressions/" + target_name})
+    expressions, expression_ids = _write_expressions(model_dir, char_id, output_dir, force=force)
     if expressions:
         references["Expressions"] = expressions
-
-    motions: dict[str, list[dict]] = {}
-    motion_sources = list(motion_bundles or [])
+    sources = list(motion_bundles or [])
     if motion_directory is not None:
-        motion_sources.extend(sorted(motion_directory.glob(motion_pattern)))
-    for bundle in dict.fromkeys(motion_sources):
-        motion_name, motion = _motion_json(bundle)
-        if not re.fullmatch(r"[\w.-]+", motion_name):
-            raise ValueError(f"不安全的动作文件名：{motion_name!r}")
-        motion_file = motion_name + ".motion3.json"
-        _write_json(output_dir / "motions" / motion_file, motion, force=force)
-        group = (
-            "Idle"
-            if "_idle-" in motion_name
-            else motion_name.removeprefix("live2d_mot_").split("-", 1)[0].capitalize()
-        )
-        motions.setdefault(group, []).append(
-            {"File": "motions/" + motion_file, "FadeInTime": 0.5, "FadeOutTime": 0.5}
-        )
+        sources.extend(sorted(motion_directory.glob(motion_pattern)))
+    motions = _write_motions(dict.fromkeys(sources), output_dir, force=force)
     if motions:
         references["Motions"] = motions
 
-    groups = []
-    eye_ids = [x for x in ("ParamEyeLOpen", "ParamEyeROpen") if x in expression_ids]
-    if eye_ids:
-        groups.append({"Target": "Parameter", "Name": "EyeBlink", "Ids": eye_ids})
-    if "ParamMouthOpenY" in expression_ids:
-        groups.append(
-            {"Target": "Parameter", "Name": "LipSync", "Ids": ["ParamMouthOpenY"]}
-        )
-    model_json = {
-        "Version": 3,
-        "FileReferences": references,
-        "Groups": groups,
-        "HitAreas": [],
-    }
+    groups = [
+        {"Target": "Parameter", "Name": name, "Ids": ids}
+        for name, candidates in GROUPS.items()
+        if (ids := [x for x in candidates if x in expression_ids])
+    ]
+    model_json = {"Version": 3, "FileReferences": references, "Groups": groups, "HitAreas": []}
     model_json_path = output_dir / (model_name + ".model3.json")
     _write_json(model_json_path, model_json, force=force)
     return {
@@ -381,6 +359,7 @@ def rebuild(
 
 
 def main() -> None:
+    use_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model_dir", type=Path, help="holodori extract 生成的 live2d_mdl_* 目录")
     parser.add_argument("-o", "--output-dir", type=Path, required=True)
