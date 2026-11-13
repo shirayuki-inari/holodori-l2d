@@ -189,7 +189,8 @@ def main() -> None:
     parser.add_argument("--character", help="同名卡牌可按角色中文名或编号筛选")
     parser.add_argument("--lang", choices=LANGUAGES, default="chs", help="chs 简中（默认）/ cht 繁中")
     parser.add_argument("--refresh", action="store_true", help="从官方接口刷新主数据和资源索引")
-    parser.add_argument("--app-version", default=master.APP_VERSION, help="游戏客户端版本（用于官方接口）")
+    parser.add_argument("--app-version", default=master.APP_VERSION,
+                        help="游戏客户端版本（默认 auto，过期时自动查询官方商店）")
     parser.add_argument("--cache-root", type=Path, default=cache_dir() / "master")
     args = parser.parse_args()
     try:

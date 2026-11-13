@@ -62,7 +62,13 @@ def test_rejects_invalid_protobuf(payload):
         list(master.fields(payload))
 
 
-def test_grpc_error_in_trailers_is_not_http_success(monkeypatch):
+@pytest.mark.parametrize("http_status,grpc_status,detail,outdated", [
+    ("200", "14", "try%20later", False),
+    ("200", "3", "OUTDATED_APP", True),
+    ("200", "3", "INVALID_ARGUMENT", False),
+    ("403", "3", "OUTDATED_APP", False),
+])
+def test_grpc_error_in_trailers_is_not_http_success(monkeypatch, http_status, grpc_status, detail, outdated):
     server = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False))
     server.initiate_connection()
 
@@ -79,8 +85,8 @@ def test_grpc_error_in_trailers_is_not_http_success(monkeypatch):
         def sendall(self, data):
             for event in server.receive_data(data):
                 if isinstance(event, h2.events.StreamEnded):
-                    server.send_headers(1, [(":status", "200"), ("content-type", "application/grpc")])
-                    server.send_headers(1, [("grpc-status", "14"), ("grpc-message", "try%20later")], end_stream=True)
+                    server.send_headers(1, [(":status", http_status), ("content-type", "application/grpc")])
+                    server.send_headers(1, [("grpc-status", grpc_status), ("grpc-message", detail)], end_stream=True)
 
         def recv(self, size):
             return server.data_to_send()
@@ -96,8 +102,107 @@ def test_grpc_error_in_trailers_is_not_http_success(monkeypatch):
 
     monkeypatch.setattr(master.socket, "create_connection", lambda *a, **kw: stream)
     monkeypatch.setattr(master.ssl, "create_default_context", Context)
-    with pytest.raises(RuntimeError, match="gRPC 14 try later"):
+    with pytest.raises(master.MasterRequestError, match=f"gRPC {grpc_status}") as caught:
         master._master_request("chs", "1.2.1")
+    assert caught.value.outdated is outdated
+    assert ("try later" if detail == "try%20later" else detail) in str(caught.value)
+
+
+def test_auto_uses_known_version_without_store_requests(monkeypatch):
+    calls = []
+    monkeypatch.setattr(master, "_master_request", lambda *args: calls.append(args) or b"frame")
+    monkeypatch.setattr(httpx, "Client", lambda **kw: pytest.fail("No store lookup needed"))
+    assert master._versioned_master_request("cht", "auto") == b"frame"
+    assert calls == [("cht", master.BUNDLED_APP_VERSION)]
+
+
+@pytest.mark.parametrize("play_result", ["current", "stale", "offline", "changed"])
+def test_auto_recovers_outdated_version_from_official_stores(monkeypatch, play_result):
+    monkeypatch.setattr(master, "BUNDLED_APP_VERSION", "1.2.1")
+    calls, stores = [], []
+
+    def request(language, version):
+        calls.append((language, version))
+        if version != "1.2.101":
+            raise master.MasterRequestError("200", "3", "OUTDATED_APP")
+        return b"frame"
+
+    def store(request):
+        stores.append(request.url.host)
+        if request.url.host == "play.google.com":
+            assert request.url.params["id"] == master.APP_BUNDLE_ID
+            if play_result == "offline":
+                raise httpx.ConnectError("unavailable", request=request)
+            if play_result == "changed":
+                return httpx.Response(200, text="new page layout")
+            version = "1.2.101" if play_result == "current" else "1.2.1"
+            return httpx.Response(200, text='other content [[["' + version + '"]],[[36]]]')
+        assert request.url.host == "itunes.apple.com"
+        assert request.url.params["id"] == "6756641249"
+        return httpx.Response(200, json={"results": [
+            {"bundleId": master.APP_BUNDLE_ID, "version": "1.2.101"},
+        ]})
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(store), **kw))
+    monkeypatch.setattr(master, "_master_request", request)
+    assert master._versioned_master_request("chs", "auto") == b"frame"
+    assert calls == [("chs", "1.2.1"), ("chs", "1.2.101")]
+    assert stores == (["play.google.com"] if play_result == "current"
+                      else ["play.google.com", "itunes.apple.com"])
+
+
+@pytest.mark.parametrize("app_version,error", [
+    ("1.2.1", master.MasterRequestError("200", "3", "OUTDATED_APP")),
+    ("auto", master.MasterRequestError("200", "14", "UNAVAILABLE")),
+    ("auto", master.MasterRequestError("200", "3", "INVALID_ARGUMENT")),
+    ("auto", OSError("connection failed")),
+])
+def test_manual_versions_and_unrelated_errors_do_not_trigger_discovery(monkeypatch, app_version, error):
+    calls = []
+
+    def request(language, version):
+        calls.append(version)
+        raise error
+
+    monkeypatch.setattr(master, "_master_request", request)
+    monkeypatch.setattr(httpx, "Client", lambda **kw: pytest.fail("Unexpected store lookup"))
+    with pytest.raises(type(error)) as caught:
+        master._versioned_master_request("chs", app_version)
+    assert caught.value is error
+    assert calls == [app_version if app_version != "auto" else master.BUNDLED_APP_VERSION]
+
+
+def test_auto_stops_after_both_stores_fail_and_explains_override(monkeypatch):
+    calls = []
+
+    def request(language, version):
+        calls.append(version)
+        raise master.MasterRequestError("200", "3", "OUTDATED_APP")
+
+    def store(request):
+        if request.url.host == "play.google.com":
+            return httpx.Response(200, text='[[["9.8.7"]],[[36]]]')
+        return httpx.Response(503)
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(store), **kw))
+    monkeypatch.setattr(master, "_master_request", request)
+    with pytest.raises(RuntimeError, match="--app-version") as caught:
+        master._versioned_master_request("chs", "auto")
+    assert calls == [master.BUNDLED_APP_VERSION, "9.8.7"]
+    assert "Google Play" in str(caught.value) and "App Store" in str(caught.value)
+
+
+@pytest.mark.parametrize("data", [
+    {"results": [{"bundleId": "other.app", "version": "1.2.101"}]},
+    {"results": [{"bundleId": master.APP_BUNDLE_ID, "version": "invalid"}]},
+    {"results": None}, [],
+])
+def test_app_store_rejects_wrong_app_and_malformed_versions(data):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=data))) as client:
+        with pytest.raises(ValueError):
+            master._app_store_version(client)
 
 
 def test_sqlcipher_pages_and_tampering():

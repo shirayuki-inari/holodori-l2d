@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import socket
 import sqlite3
@@ -22,13 +23,98 @@ from .util import write_atomic
 
 
 HOST = "us.game-hololive-dreams.com"
-APP_VERSION = "1.2.1"
+APP_VERSION = "auto"
+BUNDLED_APP_VERSION = "1.2.101"
+APP_BUNDLE_ID = "game.qualiarts.hololive.dreams.com"
 # Shared game-client protocol constants, not user credentials or session tokens.
 # Raw master-pack keys are obtained at runtime and are not bundled with the tool.
 NETWORK_KEYWORD = b"BJYZ0w3DJm"
 OCTO_KEY = "B46OtKlGGHoz6sxbOWDe3VUvBsagXxr5av38IQIKUKo="
 OCTO_CLIENT_KEY = "CwFhQ+S5m4nERWVaq5oFZIP0cZLc0j7O/zllG0UYVNo="
 FIXED_SIZES = {1: 8, 5: 4}  # protobuf wire types: fixed64 / fixed32
+
+
+class MasterRequestError(RuntimeError):
+    def __init__(self, http_status: str | None, grpc_status: str | None, detail: str):
+        self.outdated = http_status == "200" and grpc_status == "3" and detail == "OUTDATED_APP"
+        super().__init__(
+            f"Master 请求失败：HTTP {http_status} / gRPC {grpc_status} {detail}；"
+            "请检查 --app-version"
+        )
+
+
+def _validated_version(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
+        raise ValueError("游戏客户端版本应为三段数字，例如 1.2.101")
+    return value
+
+
+def _google_play_version(client) -> str:
+    response = client.get(
+        "https://play.google.com/store/apps/details",
+        params={"id": APP_BUNDLE_ID, "hl": "en", "gl": "US"},
+    )
+    response.raise_for_status()
+    # Play's SoftwareApplication JSON-LD omits the version. Its embedded app
+    # details contain this nested version entry; fail closed if the layout changes.
+    versions = set(re.findall(r'\[\[\["([0-9]+\.[0-9]+\.[0-9]+)"\]\],\[\[', response.text))
+    if len(versions) != 1:
+        raise ValueError("Google Play 页面缺少唯一的客户端版本")
+    return _validated_version(versions.pop())
+
+
+def _app_store_version(client) -> str:
+    response = client.get(
+        "https://itunes.apple.com/lookup", params={"id": "6756641249", "country": "us"},
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        for app in data["results"]:
+            if isinstance(app, dict) and app.get("bundleId") == APP_BUNDLE_ID:
+                return _validated_version(app.get("version"))
+    raise ValueError("App Store 未返回国际服客户端版本")
+
+
+def _versioned_master_request(language: str, app_version: str) -> bytes:
+    if app_version != "auto":
+        # An explicit override must be honored, including outdated versions.
+        return _master_request(language, _validated_version(app_version))
+    try:
+        return _master_request(language, BUNDLED_APP_VERSION)
+    except MasterRequestError as error:
+        if not error.outdated:
+            raise
+        original = error
+
+    import httpx
+
+    logging.getLogger(__name__).warning(
+        "游戏客户端版本 %s 已过期，正在从官方商店查询新版本……", BUNDLED_APP_VERSION,
+    )
+    tried = {BUNDLED_APP_VERSION}
+    failures = []
+    with httpx.Client(timeout=20, follow_redirects=True) as client:
+        for source, lookup in (("Google Play", _google_play_version), ("App Store", _app_store_version)):
+            try:
+                version = lookup(client)
+            except (httpx.HTTPError, ValueError) as error:
+                failures.append(f"{source}：{error}")
+                continue
+            if version in tried:
+                failures.append(f"{source} 返回的版本 {version} 仍已过期")
+                continue
+            tried.add(version)
+            try:
+                return _master_request(language, version)
+            except MasterRequestError as error:
+                if not error.outdated:
+                    raise
+                failures.append(f"{source} 版本 {version}：OUTDATED_APP")
+    raise RuntimeError(
+        "自动获取可用客户端版本失败；可用 --app-version <当前游戏版本> 手动指定。"
+        + "；".join(failures)
+    ) from original
 
 
 def _varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -133,7 +219,7 @@ def _master_request(language: str, app_version: str) -> bytes:
                 (":path", "/rpc.api.Master/Get"),
                 ("content-type", "application/grpc+proto-enc"), ("te", "trailers"),
                 ("grpc-accept-encoding", "identity"), ("x-app-version", app_version),
-                ("x-app-bundle-id", "game.qualiarts.hololive.dreams.com"),
+                ("x-app-bundle-id", APP_BUNDLE_ID),
                 ("x-app-lang-type", language), ("x-app-os-type", "Android"),
                 ("x-app-store-type", "GooglePlay"),
             ])
@@ -160,15 +246,12 @@ def _master_request(language: str, app_version: str) -> bytes:
                     stream.sendall(outgoing)
     if headers.get(":status") != "200" or headers.get("grpc-status") != "0":
         detail = unquote(headers.get("grpc-message", ""))
-        raise RuntimeError(
-            f"Master 请求失败：HTTP {headers.get(':status')} / "
-            f"gRPC {headers.get('grpc-status')} {detail}；请检查 --app-version"
-        )
+        raise MasterRequestError(headers.get(":status"), headers.get("grpc-status"), detail)
     return bytes(response)
 
 
 def fetch_master(language: str, app_version: str = APP_VERSION) -> dict:
-    plain = _master_payload(_master_request(language, app_version))
+    plain = _master_payload(_versioned_master_request(language, app_version))
     manifest = {"version": "", "packs": {}}
     schema = {1: "type", 2: "file_name", 4: "crypto_key", 5: "download_url"}
     for number, wire, value in fields(plain):

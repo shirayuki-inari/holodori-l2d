@@ -121,7 +121,7 @@ output/
 | `--force` | Overwrite existing output with different content |
 | `--experimental-motions` | **Experimental**: also export candidate motions |
 | `--motion-level <level>` | Motion level for the option above, default `lv05` |
-| `--app-version <version>` | Client version for the official API, default `1.2.1`; set the current game version if searches fail after a game update |
+| `--app-version <version>` | Default `auto`: if the server rejects the known version as outdated, look up official stores and retry; a specific game version can also be set manually |
 | `--catalog <file>` | Use a specific asset catalog file |
 | `--version` | Show the version |
 

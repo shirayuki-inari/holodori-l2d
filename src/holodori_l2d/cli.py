@@ -282,7 +282,7 @@ def _parser() -> argparse.ArgumentParser:
     add("--character", help="按角色名或编号筛选搜索结果")
     add("--pack-character", metavar="角色名或编号", help="下载角色全部模型，生成角色名.zip")
     add("--refresh", action="store_true", help="刷新官方卡牌目录")
-    add("--app-version", default=APP_VERSION, help="官方主数据接口使用的客户端版本")
+    add("--app-version", default=APP_VERSION, help="游戏客户端版本（默认 auto，过期时自动查询官方商店）")
     add("--batch", type=Path, help="批量清单：每行一个卡牌/模型 ID 和自定义保存文件夹名（允许空格）")
     add("-o", "--output-root", type=Path, help="输出根目录（默认当前目录/output）")
     add("--cache-root", type=Path, help="下载缓存（默认当前目录/input/.holodori_assets）")
