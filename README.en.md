@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | English
 
-An unofficial Live2D model exporter for `hololive Dreams`. Search for a card or character, pick what you want, and the tool downloads the game assets and builds model folders and ZIPs that work in Cubism viewers and VTube Studio.
+An unofficial Live2D model exporter for `hololive Dreams`. Search for a card or character, pick what you want, and the tool downloads the game assets and builds model folders (optionally zipped) that work in Cubism viewers and VTube Studio.
 
 > This project is not affiliated with COVER, QualiArts or Live2D. The repository contains no game assets; exported files still belong to their rights holders. Read the [copyright notice](COPYRIGHT.md) (in Chinese; summarized under [License](#license)) before use.
 
@@ -34,11 +34,14 @@ Enter a card name, character name, English character name or character number (p
 | Space | Select or deselect (multiple allowed) |
 | A | Select all / clear |
 | Enter | Download the selection, or the current item if nothing is selected |
+| Z | Toggle ZIP packing (off by default; shown at the top of the list) |
 | P | Pack every model of the current character into one ZIP (asks first) |
 | Esc | Back to search |
 | Ctrl+C | Quit |
 
-Cards marked “暂无模型” (no model) cannot be selected; “已导出” (exported) means the model is already in the output folder. After a download finishes you return to the search prompt.
+Cards marked “暂无模型” (no model) cannot be selected; “已导出” (exported) means the model is already in the output folder. While downloading, each model takes a single progress line that ends with where it was saved; afterwards you return to the search prompt.
+
+With ZIP packing on, a single model becomes `<folder>.zip`; when several models are downloaded at once, every successfully exported folder goes into one `live2d_<date-time>.zip`.
 
 Exports go to `output/` in the current directory. Copy a model folder as a whole into VTube Studio's `Live2DModels/` to use it.
 
@@ -78,7 +81,7 @@ A UTF-8 text file with one ID (any of the three forms) and an output folder name
 live2d_mdl_00024-nrml-0020-00 my model 2
 ```
 
-Each line is processed independently; an error does not stop the others, and a per-line report is printed at the end. Folder names must be unique within a batch.
+Each line is processed independently; an error does not stop the others, and each line prints one result line. Folder names must be unique within a batch. With `--zip`, all successfully exported folders go into one ZIP named after the batch file (e.g. `batch.zip`).
 
 ### Search only
 
@@ -99,13 +102,13 @@ output/
 │  ├─ icon.jpg                           card thumbnail
 │  ├─ expressions/
 │  └─ motions/                           only with experimental motions
-└─ 独占宝物♡水力加农炮.zip
+└─ 独占宝物♡水力加农炮.zip               only with ZIP packing on
 ```
 
 - **Naming**: downloads from the search list are named after the card. When card names collide, the folder name gets the character name or ID appended. Characters Windows does not allow become full-width equivalents.
 - **Icon**: `icon.jpg` is the matching card's thumbnail. If no unique thumbnail is found it is skipped; another card's image is never used.
 - **VTube Studio settings**: `.vtube.json` is created only on the first export and is never rewritten afterwards, even with `--force`, so your VTube Studio settings are preserved.
-- **Overwriting**: existing files with different content cause an error unless `--force` is given; an existing single-model ZIP is also only updated with `--force`.
+- **Overwriting**: existing files with different content cause an error unless `--force` is given; an existing ZIP with the same name is also only updated with `--force`.
 - **Re-exporting**: `.holodori-model.json` records the files this tool generated. A re-export deletes files from the previous export that are no longer produced; files you added yourself, `.vtube.json` and `icon.jpg` are never deleted.
 
 ## Options
@@ -117,7 +120,8 @@ output/
 | `--refresh` | Update the card catalog (after new cards are released) |
 | `-o, --output-root <dir>` | Output folder, default `./output` |
 | `--cache-root <dir>` | Download cache, default `./input/.holodori_assets` |
-| `--no-zip` | Do not create single-model ZIPs (not with `--pack-character`) |
+| `--zip` | Also create a ZIP; several models go into one ZIP (toggle with Z in the list) |
+| `--json` | Print detailed results as JSON at the end, for scripts (ID, `--batch`, `--pack-character`) |
 | `--force` | Overwrite existing output with different content |
 | `--experimental-motions` | **Experimental**: also export candidate motions |
 | `--motion-level <level>` | Motion level for the option above, default `lv05` |

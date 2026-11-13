@@ -3,11 +3,85 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
+import unicodedata
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+
+def _width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
+def _clip(text: str, columns: int) -> str:
+    if _width(text) <= columns:
+        return text
+    while text and _width(text) > columns - 1:
+        text = text[:-1]
+    return text + "…"
+
+
+class StatusLine:
+    """One terminal line rewritten in place for progress; finished lines are kept.
+
+    When stdout is not a terminal, progress updates are dropped and only
+    finished lines are printed, so logs and pipes stay clean.
+    """
+
+    def __init__(self) -> None:
+        self.prefix = ""
+        self._shown = 0
+
+    @staticmethod
+    def _stream():
+        return sys.stdout
+
+    def _live(self) -> bool:
+        try:
+            return self._stream().isatty()
+        except (AttributeError, ValueError):
+            return False
+
+    def update(self, text: str) -> None:
+        if not self._live():
+            return
+        text = _clip(self.prefix + text, shutil.get_terminal_size().columns - 1)
+        width = _width(text)
+        self._stream().write("\r" + text + " " * max(self._shown - width, 0))
+        self._stream().flush()
+        self._shown = width
+
+    def clear(self) -> None:
+        if self._shown and self._live():
+            self._stream().write("\r" + " " * self._shown + "\r")
+            self._stream().flush()
+        self._shown = 0
+
+    def print(self, text: str = "") -> None:
+        """Replace the progress line with a permanent one."""
+        self.clear()
+        print(text, file=self._stream(), flush=True)
+
+    @contextmanager
+    def scope(self, prefix: str) -> Iterator[None]:
+        """Show ``prefix`` before every update made inside the block."""
+        old, self.prefix = self.prefix, prefix + "  "
+        try:
+            yield
+        finally:
+            self.prefix = old
+            self.clear()
+
+
+status = StatusLine()
+
+
+def format_size(size: int) -> str:
+    return f"{size / 1024 / 1024:.1f} MB"
 
 
 def cache_dir(root: Path | None = None) -> Path:
@@ -75,3 +149,28 @@ def write_zip(destination: Path, folders: Iterable[Path], extra: dict[str, bytes
 def summarize(results: list[dict]) -> dict:
     failed = sum(item["status"] == "error" for item in results)
     return {"total": len(results), "succeeded": len(results) - failed, "failed": failed, "results": results}
+
+
+def display_path(path: str | Path) -> str:
+    """Show paths under the working directory relative to it, others in full."""
+    path = Path(path)
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def report_item(label: str, item: dict) -> None:
+    """Print one finished download as a single line."""
+    if item["status"] == "ok":
+        result = item.get("result") or {}
+        notes = "；".join(result.get("notes", []))
+        where = display_path(result["output_dir"]) if "output_dir" in result else ""
+        status.print(f"{label}  已保存 {where}" + (f"（{notes}）" if notes else ""))
+    else:
+        status.print(f"{label}  失败：{item['error']}")
+
+
+def report_summary(summary: dict) -> None:
+    if summary["total"] > 1:
+        status.print(f"完成：成功 {summary['succeeded']}，失败 {summary['failed']}。")

@@ -7,10 +7,11 @@ import importlib.util
 import json
 import platform
 import re
-import subprocess
 import sys
 import tempfile
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 import httpx
@@ -20,7 +21,8 @@ from .icon import card_thumbnail_name, save_icon, select_thumbnail
 from .master import APP_VERSION
 from .naming import EXPORT_INFO, export_owner, model_id_from_input, read_export_info, validate_name
 from .rebuild import rebuild
-from .util import cache_dir, json_bytes, output_dir, summarize, use_utf8_stdio, write_atomic, write_zip
+from .util import (cache_dir, display_path, format_size, json_bytes, output_dir, report_item,
+                   report_summary, status, summarize, use_utf8_stdio, write_atomic, write_zip)
 from .vtube import ensure_config
 
 
@@ -38,10 +40,60 @@ def _batch_entry(card_id: str, folder_name: str) -> None:
     validate_name(folder_name)
 
 
-def _run_upstream(*args: str) -> None:
-    result = subprocess.run([sys.executable, "-m", "holodori_asset_tools", *args], check=False)
-    if result.returncode:
-        raise RuntimeError(f"holodori-asset-tools 运行失败（退出码 {result.returncode}）")
+def _fetch_bundles(catalog: Path, names: list[str], directory: Path, *, workers: int = 8) -> None:
+    """Download and decrypt asset bundles in parallel behind one progress line."""
+    from holodori_asset_tools import catalog as upstream_catalog, crypto
+
+    entries = {entry.name: entry for entry in upstream_catalog.Catalog.load(catalog).assetBundles}
+    jobs = [entries[name] for name in names if name in entries]
+    if not jobs:
+        return
+    total = sum(entry.size for entry in jobs)
+    received = 0
+    lock = threading.Lock()
+
+    def fetch(client: httpx.Client, entry) -> None:
+        nonlocal received
+        error = None
+        for _ in range(3):
+            got = 0
+            try:
+                chunks = []
+                with client.stream("GET", entry.url) as response:
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes():
+                        chunks.append(chunk)
+                        got += len(chunk)
+                        with lock:
+                            received += len(chunk)
+                write_atomic(directory / entry.name, crypto.decrypt(b"".join(chunks), entry.name))
+                return
+            except Exception as failure:
+                error = failure
+                with lock:
+                    received -= got
+        raise RuntimeError(f"{entry.name}：{error}")
+
+    def show(done: int) -> None:
+        size = format_size(received) + (f"/{format_size(total)}" if total else "")
+        status.update(f"下载资源 {done}/{len(jobs)} · {size}")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    with httpx.Client(http2=True, timeout=120, follow_redirects=True) as client:
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(fetch, client, entry) for entry in jobs]
+        pending = set(futures)
+        try:
+            while pending:
+                _, pending = wait(pending, timeout=0.2)
+                show(len(jobs) - len(pending))
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown()
+    errors = [str(future.exception()) for future in futures if future.exception()]
+    if errors:
+        raise RuntimeError("下载失败：" + "；".join(errors[:3]) + ("……" if len(errors) > 3 else ""))
 
 
 def _extract_bundle(source: Path, destination: Path) -> None:
@@ -70,7 +122,7 @@ def _load_catalog(catalog: Path, wanted: list[str], *, refreshable: bool) -> set
     upstream_catalog.get(catalog)
     names = _catalog_entries(catalog)
     if refreshable and not set(wanted) <= names:
-        print("缓存索引没有这个模型或卡牌缩略图，正在获取最新索引……")
+        status.update("更新游戏资源索引……")
         upstream_catalog.fetch().save(catalog)
         names = _catalog_entries(catalog)
     return names
@@ -94,12 +146,25 @@ def _nonempty(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
-def _make_zip(folder: Path, *, force: bool) -> Path:
-    destination = folder.with_name(folder.name + ".zip")
+def zip_exports(folders: list[Path], destination: Path, *, force: bool) -> tuple[Path, bool]:
+    """Archive exported folders into one ZIP; return it and whether it was written."""
     if destination.exists() and not force:
-        print(f"压缩包已存在，未覆盖：{destination}（需要更新时加 --force）")
-        return destination
-    return write_zip(destination, [folder])
+        return destination, False
+    status.update("打包 ZIP……")
+    return write_zip(destination, folders), True
+
+
+def bundle_exports(results: list[dict], root: Path, name: str, *, force: bool) -> Path | None:
+    """Pack all successful exports together: one model as <folder>.zip, several as <name>.zip."""
+    folders = [Path(item["result"]["output_dir"]) for item in results if item["status"] == "ok"]
+    if not folders:
+        return None
+    destination = (folders[0].with_name(folders[0].name + ".zip") if len(folders) == 1
+                   else root / f"{name}.zip")
+    archive, written = zip_exports(folders, destination, force=force)
+    status.print(f"压缩包：{display_path(archive)}" if written
+                 else f"压缩包已存在，未覆盖：{display_path(archive)}（需要更新时加 --force）")
+    return archive
 
 
 def _cache_paths(cache_root: Path | None, catalog_path: Path | None) -> tuple[Path, Path]:
@@ -113,10 +178,7 @@ def _download(cache_root: Path, catalog: Path, names: list[str]) -> None:
     raw_bundles = cache_root / "raw" / "assetbundles"
     missing = [name for name in names if not _nonempty(raw_bundles / name)]
     if missing:
-        _run_upstream(
-            "download", str(cache_root / "raw"), "--catalog", str(catalog), "--no-overwrite",
-            "--filter", "^(?:" + "|".join(map(re.escape, missing)) + ")$",
-        )
+        _fetch_bundles(catalog, missing, raw_bundles)
         missing = [name for name in missing if not _nonempty(raw_bundles / name)]
     if missing:
         raise RuntimeError("下载后仍缺少资源：" + ", ".join(missing))
@@ -160,10 +222,10 @@ def prefetch(models: list[tuple[str, str | None]], *, cache_root: Path | None = 
                 continue
             thumbnail = select_thumbnail(names, card_id)
             selected += [f"live2d_mdl_{model_id}", *expressions, *motions, *([thumbnail] if thumbnail else [])]
-        print(f"批量下载/检查 {len(models)} 个模型的资源……", flush=True)
-        _download(cache_root, catalog, list(dict.fromkeys(selected)))
+        with status.scope(f"{len(models)} 个模型"):
+            _download(cache_root, catalog, list(dict.fromkeys(selected)))
     except Exception as error:  # Best effort only: prepare() retries and reports per model.
-        print(f"批量下载未全部完成，将逐个重试：{error}", flush=True)
+        status.print(f"批量下载未全部完成，将逐个重试：{error}")
 
 
 def prepare(
@@ -177,7 +239,7 @@ def prepare(
     catalog_path: Path | None = None,
     motion_level: str | None = None,
     force: bool = False,
-    make_zip: bool = True,
+    make_zip: bool = False,
 ) -> dict:
     """Download, extract and rebuild one model; ``model_name`` renames its files.
 
@@ -201,21 +263,23 @@ def prepare(
         raise ValueError(f"输出目录不属于此卡牌，请换一个目录：{destination}")
     cache_root, catalog = _cache_paths(cache_root, catalog_path)
     raw_bundles = cache_root / "raw" / "assetbundles"
+    notes = []
 
+    status.update("读取资源索引……")
     names = _load_catalog(catalog, [bundle, *filter(None, [card_thumbnail_name(card_id)])],
                           refreshable=catalog_path is None)
     expressions, motions = _selected_assets(names, model_id, character, motion_level)
     thumbnail = select_thumbnail(names, card_id)
-    if thumbnail is None:
-        print("未找到唯一对应的卡牌缩略图，跳过 icon.jpg。", flush=True)
+    if thumbnail is None and card_thumbnail_name(card_id) is not None:
+        notes.append("未找到卡牌缩略图，未生成 icon.jpg")  # Outfit-only models never have one.
     thumbnails = [thumbnail] if thumbnail else []
-    print(f"下载/检查：1 个模型、{len(expressions)} 个表情、{len(motions)} 个候选动作、"
-          f"{len(thumbnails)} 张卡牌缩略图", flush=True)
     _download(cache_root, catalog, [bundle, *expressions, *motions, *thumbnails])
 
     with tempfile.TemporaryDirectory(prefix="live2d-extract-", dir=cache_root) as temp:
         extracted = Path(temp)
-        for name in [bundle, *expressions, *thumbnails]:
+        to_extract = [bundle, *expressions, *thumbnails]
+        for number, name in enumerate(to_extract, 1):
+            status.update(f"提取资源 {number}/{len(to_extract)}")
             _extract_bundle(raw_bundles / name, extracted)
         model_dir = extracted / bundle
         if not model_dir.is_dir() or not any(model_dir.glob("*.png")):
@@ -223,6 +287,7 @@ def prepare(
         missing = [name for name in expressions if not _nonempty(extracted / name / f"{name}.json")]
         if missing:
             raise RuntimeError("表情包提取失败：" + ", ".join(missing))
+        status.update("生成模型文件……" if not motions else f"生成模型文件并转换 {len(motions)} 个动作……")
         summary = rebuild(model_dir, destination, motion_bundles=[raw_bundles / name for name in motions],
                           force=force, model_name=model_name)
         if thumbnail:
@@ -234,43 +299,60 @@ def prepare(
     removed = _remove_stale(destination, files)
     if removed:
         summary["removed"] = removed
-        print(f"已删除上次导出遗留、本次未生成的 {len(removed)} 个文件。", flush=True)
     write_atomic(destination / EXPORT_INFO, json_bytes({**(card_info or {}), "files": files}))
     summary["asset_id"] = model_id
     if output_name is not None:
         summary.update(card_id=card_id, output_name=output_name)
     summary["output_dir"] = str(destination)
     if make_zip:
-        summary["zip"] = str(_make_zip(destination, force=force))
+        archive, written = zip_exports([destination], destination.with_name(destination.name + ".zip"),
+                                       force=force)
+        summary["zip"] = str(archive)
+        if not written:
+            notes.append("压缩包已存在，未覆盖（需要更新时加 --force）")
+    if notes:
+        summary["notes"] = notes
     return summary
 
 
-def prepare_batch(batch_file: Path, **options: object) -> dict:
-    """Process card/custom-folder pairs; report all line-level failures."""
+def prepare_batch(batch_file: Path, *, make_zip: bool = False, **options: object) -> dict:
+    """Process card/custom-folder pairs; report all line-level failures.
+
+    With ``make_zip`` all successful folders go into one ZIP named after the batch file.
+    """
+    entries = [(number, line.strip())
+               for number, line in enumerate(batch_file.read_text(encoding="utf-8-sig").splitlines(), 1)
+               if line.strip() and not line.strip().startswith("#")]
+    if not entries:
+        raise ValueError("批量文件没有可处理的记录")
     results = []
     used_names = set()
-    for line_number, line in enumerate(batch_file.read_text(encoding="utf-8-sig").splitlines(), 1):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
+    for position, (line_number, line) in enumerate(entries, 1):
         fields = line.split(maxsplit=1)
         item: dict = {"line": line_number, **dict(zip(("card_id", "output_name"), fields))}
-        try:
-            if len(fields) != 2:
-                raise ValueError("每行应为：卡牌/模型ID 自定义保存文件夹名")
-            card_id, output_name = fields
-            _batch_entry(card_id, output_name)
-            if output_name.casefold() in used_names:
-                raise ValueError(f"保存文件夹名重复：{output_name}")
-            used_names.add(output_name.casefold())
-            item.update(result=prepare(card_id, output_name=output_name, **options), status="ok")
-        except Exception as error:
-            item.update(status="error", error=str(error))
+        label = f"[{position}/{len(entries)}] 第 {line_number} 行 {fields[-1]}"
+        with status.scope(label):
+            try:
+                if len(fields) != 2:
+                    raise ValueError("每行应为：卡牌/模型ID 自定义保存文件夹名")
+                card_id, output_name = fields
+                _batch_entry(card_id, output_name)
+                if output_name.casefold() in used_names:
+                    raise ValueError(f"保存文件夹名重复：{output_name}")
+                used_names.add(output_name.casefold())
+                item.update(result=prepare(card_id, output_name=output_name, **options), status="ok")
+            except Exception as error:
+                item.update(status="error", error=str(error))
         results.append(item)
-        print(f"第 {line_number} 行：{item['status']}", flush=True)
-    if not results:
-        raise ValueError("批量文件没有可处理的记录")
-    return summarize(results)
+        report_item(label, item)
+    summary = summarize(results)
+    report_summary(summary)
+    if make_zip:
+        archive = bundle_exports(results, output_dir(options.get("output_root")), batch_file.stem,
+                                 force=bool(options.get("force")))
+        if archive is not None:
+            summary["zip"] = str(archive)
+    return summary
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -292,9 +374,19 @@ def _parser() -> argparse.ArgumentParser:
     add("--motion-level", help="配合 --experimental-motions 选择候选动作等级，默认 lv05")
     # Motions used to be on by default; keep the old opt-out flag working as a no-op.
     add("--no-motions", dest="experimental_motions", action="store_false", help=argparse.SUPPRESS)
-    add("--no-zip", action="store_true", help="不生成压缩包")
+    add("--zip", action="store_true",
+        help="额外生成 ZIP；一次下载多个模型时全部打包进同一个 ZIP（交互模式下也可按 Z 切换）")
+    # ZIPs used to be on by default; keep the old opt-out flag working.
+    add("--no-zip", dest="zip", action="store_false", help=argparse.SUPPRESS)
     add("--force", action="store_true", help="覆盖已有的生成文件")
+    add("--json", action="store_true", help="结束后以 JSON 输出详细结果（ID / --batch / --pack-character）")
     return parser
+
+
+def _report_single(result: dict) -> None:
+    report_item("完成", {"status": "ok", "result": result})
+    if "zip" in result:
+        status.print(f"压缩包：{display_path(result['zip'])}")
 
 
 def main() -> None:
@@ -303,8 +395,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.batch is not None and args.asset_id is not None:
         parser.error("--batch 与单项 ID 不能同时使用")
-    if args.pack_character is not None and (args.batch is not None or args.asset_id is not None or args.no_zip):
-        parser.error("--pack-character 不能与搜索词、--batch 或 --no-zip 同时使用")
+    if args.pack_character is not None and (args.batch is not None or args.asset_id is not None):
+        parser.error("--pack-character 不能与搜索词或 --batch 同时使用")
     if args.motion_level is not None and not args.experimental_motions:
         parser.error("--motion-level 需要配合 --experimental-motions 使用")
     options = dict(
@@ -313,19 +405,23 @@ def main() -> None:
         catalog_path=args.catalog,
         motion_level=(args.motion_level or "lv05") if args.experimental_motions else None,
         force=args.force,
-        make_zip=not args.no_zip,
+        make_zip=args.zip,
     )
     try:
         if args.pack_character is not None:
             from . import search
             from .character_pack import download_character, resolve_character
+            status.update("正在加载卡牌目录……")
             index = search.load_index(cache_dir(args.cache_root) / "master", language=args.lang,
                                       refresh=args.refresh, app_version=args.app_version)
             result = download_character(resolve_character(index, args.pack_character), index, **options)
         elif args.batch is not None:
             result = prepare_batch(args.batch, **options)
         elif args.asset_id is not None and _is_id(args.asset_id):
-            result = prepare(args.asset_id, **options)
+            with status.scope(args.asset_id):
+                result = prepare(args.asset_id, **options)
+            if not args.json:
+                _report_single(result)
         else:
             from .interactive import run
             result = run(args.asset_id, language=args.lang, character=args.character,
@@ -334,13 +430,16 @@ def main() -> None:
                 parser.exit(1)
             return
     except (KeyboardInterrupt, EOFError):
-        print("\n已取消。")
+        status.print("\n已取消。")
         return
     except ImportError:
+        status.clear()
         parser.exit(1, '请先安装依赖：python -m pip install -e ".[assets]"\n')
     except (ValueError, RuntimeError, OSError, httpx.HTTPError) as error:
+        status.clear()
         parser.exit(1, f"错误：{error}\n")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     if result.get("failed"):
         parser.exit(1)
 

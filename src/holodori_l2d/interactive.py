@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 
 from . import search
 from .naming import export_key, export_names, exported_keys
 from .search import character_label, downloadable
-from .util import cache_dir, output_dir, summarize
+from .util import cache_dir, output_dir, report_item, report_summary, status, summarize
 
 
-HELP = "↑↓ 移动  空格 多选  A 全选/清空  Enter 下载（未勾选时下载当前项）  P 当前角色全模型打包  Esc 重新搜索  Ctrl+C 退出"
+HELP = ("↑↓ 移动  空格 多选  A 全选/清空  Enter 下载（未勾选时下载当前项）  Z 开关 ZIP 打包  "
+        "P 当前角色全模型打包  Esc 重新搜索  Ctrl+C 退出")
 MOVES = {"up": -1, "down": 1, "pageup": -10, "pagedown": 10}
 
 
@@ -20,9 +22,12 @@ class CharacterPackRequest:
     character_id: str
 
 
-def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
+def select_cards(rows: list[dict], *, exported: set[str] = frozenset(), settings: dict | None = None,
                  input=None, output=None) -> list[dict] | CharacterPackRequest | None:
-    """Return the chosen rows, a character-pack request, or None to search again."""
+    """Return the chosen rows, a character-pack request, or None to search again.
+
+    ``settings["zip"]`` is toggled in place with Z and kept for later searches.
+    """
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, Window
@@ -31,6 +36,7 @@ def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
     from prompt_toolkit.styles import Style
 
     cursor, selected = 0, set()
+    settings = {"zip": False} if settings is None else settings
     available = {i for i, row in enumerate(rows) if downloadable(row)}
     if not available:
         return []
@@ -67,6 +73,10 @@ def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
     def back(event):
         event.app.exit(result=None)
 
+    @bindings.add("z")
+    def toggle_zip(event):
+        settings["zip"] = not settings.get("zip")
+
     @bindings.add("p")
     def pack_character(event):
         event.app.exit(result=CharacterPackRequest(rows[cursor]["character_id"]))
@@ -96,7 +106,8 @@ def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
 
     control = FormattedTextControl(render, focusable=True, show_cursor=False)
     layout = Layout(HSplit([
-        Window(FormattedTextControl(lambda: f"找到 {len(rows)} 项 · 已选 {len(selected)} 项"), height=1),
+        Window(FormattedTextControl(lambda: f"找到 {len(rows)} 项 · 已选 {len(selected)} 项 · "
+                                            f"ZIP 打包：{'开' if settings.get('zip') else '关'}"), height=1),
         Window(control, height=Dimension(min=1, max=12), wrap_lines=False),
         Window(FormattedTextControl(HELP), height=3, wrap_lines=True),
     ]), focused_element=control)
@@ -107,30 +118,37 @@ def select_cards(rows: list[dict], *, exported: set[str] = frozenset(),
     ).run()
 
 
-def download_cards(rows: list[dict], index: dict, **options) -> dict:
-    from .cli import prefetch, prepare
+def download_cards(rows: list[dict], index: dict, *, make_zip: bool = False, **options) -> dict:
+    """Export each row into its own folder; ``make_zip`` packs all successful ones into one ZIP."""
+    from .cli import bundle_exports, prefetch, prepare
 
+    root = output_dir(options.get("output_root"))
     prefetch([(row["resource_name"], row["card_id"]) for row in rows if downloadable(row)], **options)
-    names = export_names(rows, search.browse_rows(index), output_dir(options.get("output_root")))
+    names = export_names(rows, search.browse_rows(index), root)
     results = []
     for number, (row, (folder, title)) in enumerate(zip(rows, names), 1):
-        print(f"\n[{number}/{len(rows)}] {row['name']} · {character_label(row)}", flush=True)
+        label = f"[{number}/{len(rows)}] {row['name']} · {character_label(row)}"
         item = {"card_id": row["card_id"], "name": row["name"]}
-        try:
-            if not downloadable(row):
-                raise ValueError("资源索引中没有此卡牌的模型")
-            card_info = {"card_id": row["card_id"], "export_id": export_key(row),
-                         "card_name": row["name"], "resource_name": row["resource_name"]}
-            item["result"] = prepare(row["resource_name"], output_name=folder, model_name=title,
-                                     card_info=card_info, **options)
-            item["status"] = "ok"
-            print(f"已保存：{item['result']['output_dir']}", flush=True)
-        except Exception as error:
-            item.update(status="error", error=str(error))
-            print(f"下载失败：{error}", flush=True)
+        with status.scope(label):
+            try:
+                if not downloadable(row):
+                    raise ValueError("资源索引中没有此卡牌的模型")
+                card_info = {"card_id": row["card_id"], "export_id": export_key(row),
+                             "card_name": row["name"], "resource_name": row["resource_name"]}
+                item["result"] = prepare(row["resource_name"], output_name=folder, model_name=title,
+                                         card_info=card_info, make_zip=False, **options)
+                item["status"] = "ok"
+            except Exception as error:
+                item.update(status="error", error=str(error))
         results.append(item)
+        report_item(label, item)
     summary = summarize(results)
-    print(f"\n完成：成功 {summary['succeeded']}，失败 {summary['failed']}。", flush=True)
+    report_summary(summary)
+    if make_zip:
+        archive = bundle_exports(results, root, datetime.now().strftime("live2d_%Y%m%d-%H%M%S"),
+                                 force=bool(options.get("force")))
+        if archive is not None:
+            summary["zip"] = str(archive)
     return summary
 
 
@@ -155,7 +173,7 @@ def run(query: str | None, *, language: str, character: str | None,
 
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ValueError("光标选择需要交互终端；请在终端启动，或使用 ID / --batch 下载")
-    print("正在加载卡牌目录……", flush=True)
+    status.update("正在加载卡牌目录……")
     try:
         index = search.load_index(cache_dir(options.get("cache_root")) / "master",
                                   language=language, refresh=refresh, app_version=app_version)
@@ -163,7 +181,10 @@ def run(query: str | None, *, language: str, character: str | None,
         raise
     except Exception as error:
         raise RuntimeError(f"加载卡牌目录失败：{error}") from error
+    finally:
+        status.clear()
     root = output_dir(options.get("output_root"))
+    settings = {"zip": bool(options.pop("make_zip", False))}
     results = []
     while True:
         try:
@@ -177,19 +198,19 @@ def run(query: str | None, *, language: str, character: str | None,
             if not any(map(downloadable, rows)):
                 print("匹配的卡牌暂时没有可下载模型，请换个关键词。")
                 continue
-            chosen = select_cards(rows, exported=exported_keys(root))
+            chosen = select_cards(rows, exported=exported_keys(root), settings=settings)
             if not chosen:
                 continue
             try:
                 if isinstance(chosen, CharacterPackRequest):
                     result = _pack_character(chosen.character_id, index, prompt, **options)
                 else:
-                    result = download_cards(chosen, index, **options)
+                    result = download_cards(chosen, index, make_zip=settings["zip"], **options)
             except (ValueError, RuntimeError, OSError) as error:
-                print(f"下载失败：{error}")
+                status.print(f"下载失败：{error}")
                 result = {"results": [{"status": "error", "error": str(error)}]}
         except (KeyboardInterrupt, EOFError):
-            print("\n已退出。")
+            status.print("\n已退出。")
             break
         if result:
             results += result["results"]

@@ -17,8 +17,7 @@ def ensure_config(model_file: Path) -> Path:
     if destination.exists():
         if not destination.is_file():
             raise ValueError(f"VTube Studio 配置路径不是文件：{destination}")
-        print(f"已保留现有 VTube Studio 配置：{destination}", flush=True)
-        return destination
+        return destination  # Keep the user's VTube Studio settings.
     config = {
         "Version": 1,
         "Name": name,

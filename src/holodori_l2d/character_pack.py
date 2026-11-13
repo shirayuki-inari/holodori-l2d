@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .naming import candidates, card_filename, list_names
 from .search import character_label, normalize
-from .util import json_bytes, output_dir, write_zip
+from .util import display_path, json_bytes, output_dir, status, write_zip
 
 
 MANIFEST = "holodori-character.json"
@@ -87,14 +87,15 @@ def download_character(character_id: str, index: dict, **options) -> dict:
     if not rows:
         raise ValueError(f"资源目录中未找到此角色的模型：{character_id}")
     name = character_label(rows[0])
-    print(f"角色全模型打包：{name}，共 {len(rows)} 个模型。", flush=True)
+    status.print(f"角色全模型打包：{name}，共 {len(rows)} 个模型。")
     result = download_cards(rows, index, **{**options, "make_zip": False})
     result.update(character_id=character_id, character=name)
     if result["failed"]:
-        print("有模型下载失败，本次未生成角色整包；可重试以补齐。", flush=True)
+        status.print("有模型下载失败，本次未生成角色整包；可重试以补齐。")
         return result
+    status.update("打包角色 ZIP……")
     archive = make_character_zip(output_dir(options.get("output_root")), character_id, name,
                                  result["results"], index)
     result["zip"] = str(archive)
-    print(f"角色整包已生成：{archive}", flush=True)
+    status.print(f"角色整包：{display_path(archive)}")
     return result
