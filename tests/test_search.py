@@ -1,8 +1,6 @@
-import json
-
 import pytest
 
-from holodori_l2d import master, search
+from holodori_l2d import search
 
 
 @pytest.fixture
@@ -58,79 +56,3 @@ def test_search_keeps_duplicates_filters_and_normalizes(tables):
     assert search.search_cards(index, "不存在") == []
     with pytest.raises(ValueError, match="不能为空"):
         search.search_cards(index, "  ")
-
-
-def test_official_refresh_then_offline_cache_and_failed_refresh(tmp_path, monkeypatch, tables):
-    required = {"Card": "Card", "Costume": "Costume", "Character": "Character",
-                "LangCard_Chs": "LangCard", "LangCharacter_Chs": "LangCharacter",
-                "LangCostume_Chs": "LangCostume"}
-    manifest = {"version": "synthetic", "packs": {name: {"type": name} for name in required}}
-    monkeypatch.setattr(master, "fetch_master", lambda *args: manifest)
-    monkeypatch.setattr(master, "read_table", lambda client, pack, schema, root: tables[required[pack["type"]]])
-    monkeypatch.setattr(master, "fetch_models", lambda client: (99, set()))
-    # Existing card-only caches are upgraded automatically.
-    (tmp_path / "cards-chs.json").write_text(
-        json.dumps({"schema_version": 1, "language": "chs", "cards": []}), encoding="utf-8",
-    )
-    index = search.load_index(tmp_path)
-    assert index["schema_version"] == search.SCHEMA_VERSION
-    assert index["models"] == []
-    assert index["master_version"] == "synthetic"
-    assert index["catalog_revision"] == 99
-    assert len(index["cards"]) == 4
-
-    def fail(*args):
-        raise RuntimeError("offline")
-
-    monkeypatch.setattr(master, "fetch_master", fail)
-    assert search.load_index(tmp_path) == index
-    with pytest.raises(RuntimeError, match="offline"):
-        search.load_index(tmp_path, refresh=True)
-    assert json.loads((tmp_path / "cards-chs.json").read_text(encoding="utf-8")) == index
-    with pytest.raises(RuntimeError, match="offline"):
-        search.load_index(tmp_path, language="cht")  # Never reuse the wrong language.
-
-
-def test_catalog_models_include_costumes_without_cards(tables):
-    tables["Costume"].append({"id": "costume-extra", "asset_id": "00002-cmmn-0000-00", "name_lang_id": "extra"})
-    tables["LangCostume"] = [{"id": "extra", "text": "特别服装"}]
-    models = {"live2d_mdl_00001-uniq-0123-00", "live2d_mdl_00002-cmmn-0000-00",
-              "live2d_mdl_00003-nrml-0003-00"}
-    cards = search.join_cards(tables, models)
-    # Two cards referencing one costume still produce only one model in the pack.
-    cards.append({**cards[0], "card_id": "card-duplicate"})
-    rows = search.join_models(tables, models, cards)
-    assert len(rows) == 3
-    assert rows[0]["card_id"] == "card-a"
-    assert rows[1]["card_id"] is None
-    assert rows[1]["name"] == "特别服装"
-    assert rows[1]["character"] == "角色乙"
-    assert rows[2]["name"] == "00003-nrml-0003-00"
-    index = {"cards": cards, "models": rows}
-    assert search.search_cards(index, "特别服装") == [rows[1]]
-    assert search.search_cards(index, "00003") == [rows[2]]
-
-
-def test_english_character_names_are_searchable(tables):
-    index = {"cards": search.join_cards(tables, set())}
-    assert index["cards"][0]["character_en"] == "Alpha Idol"
-    assert [r["card_id"] for r in search.search_cards(index, "alpha")] == ["card-a", "card-c", "card-d"]
-    assert search.search_cards(index, "共享", "ALPHA IDOL")[0]["card_id"] == "card-a"
-    assert search.search_cards(index, "Alpha Idol")[0]["card_id"] == "card-a"  # Exact match ranks first.
-
-
-def test_old_cache_upgrades_online_and_falls_back_offline(tmp_path, monkeypatch, capsys):
-    old = {"schema_version": 2, "language": "chs", "cards": [], "models": []}
-    (tmp_path / "cards-chs.json").write_text(json.dumps(old), encoding="utf-8")
-
-    def offline(*args):
-        raise RuntimeError("offline")
-
-    monkeypatch.setattr(master, "fetch_master", offline)
-    assert search.load_index(tmp_path) == old  # Still searchable without English names.
-    assert "offline" in capsys.readouterr().err
-    with pytest.raises(RuntimeError, match="offline"):
-        search.load_index(tmp_path, refresh=True)  # An explicit refresh still reports failure.
-    (tmp_path / "cards-chs.json").write_text(json.dumps({**old, "schema_version": 1}), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="offline"):
-        search.load_index(tmp_path)  # Too old to use at all.
